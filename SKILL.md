@@ -65,7 +65,7 @@ When the user says **"news-aggregator-skill 如意如意"** (or similar "menu/he
 If the user requests a specific time window (e.g., "past X hours") and the results are sparse (< 5 items):
 1.  **Prioritize User Window**: First, list all items that strictly fall within the user's requested time (Time < X).
 2.  **Smart Fill**: If the list is short, you MUST include high-value/high-heat items from a wider range (e.g. past 24h) to ensure the report provides at least 5 meaningful insights.
-2.  **Annotation**: Clearly mark these older items (e.g., "⚠️ 18h ago", "🔥 24h Hot") so the user knows they are supplementary.
+    *   **Annotation**: Clearly mark these older items (e.g., "⚠️ 18h ago", "🔥 24h Hot") so the user knows they are supplementary.
 3.  **High Value**: Always prioritize "SOTA", "Major Release", or "High Heat" items even if they slightly exceed the time window.
 4.  **GitHub Trending Exception**: For purely list-based sources like **GitHub Trending**, strictly return the valid items from the fetched list (e.g. Top 10). **List ALL fetched items**. Do **NOT** perform "Smart Fill".
     *   **Deep Analysis (Required)**: For EACH item, you **MUST** leverage your AI capabilities to analyze:
@@ -76,20 +76,29 @@ If the user requests a specific time window (e.g., "past X hours") and the resul
 ### 6. Response Guidelines (CRITICAL)
 
 **Format & Style:**
-- **Language**: Simplified Chinese (简体中文).
+- **Language**: Simplified Chinese (简体中文). **(IMPORTANT: Translate Title, Summary, and Analysis into Chinese)**
 - **Style**: Magazine/Newsletter style (e.g., "The Economist" or "Morning Brew" vibe). Professional, concise, yet engaging.
 - **Structure**:
-    - **Global Headlines**: Top 3-5 most critical stories across all domains.
+    - **Global Headlines**: **Top 15-20** critical stories across all domains. (For Global Scan, aim for comprehensive coverage, not just a few highlights).
     - **Tech & AI**: Specific section for AI, LLM, and Tech items.
     - **Finance / Social**: Other strong categories if relevant.
-- **Item Format**:
-    - **Title**: **MUST be a Markdown Link** to the original URL.
-        - ✅ Correct: `### 1. [OpenAI Releases GPT-5](https://...)`
-        - ❌ Incorrect: `### 1. OpenAI Releases GPT-5`
-    - **Metadata Line**: Must include Source, **Time/Date**, and Heat/Score.
-    - **1-Liner Summary**: A punchy, "so what?" summary.
+- **Item Format Template (STRICT)**:
+    ```markdown
+    #### Index. [Title (Translated)](https://original-url.com)
+    > **Source**: SourceName | **Time**: X hours ago | **Heat**: 🔥 999
+    > **Hacker News**: [Discussion](https://news.ycombinator.com/item?id=ITEM_ID) (Only for HN items)
+    > **Summary**: One sentence summary in Chinese.
+    > *   **Deep Dive**: (Optional) Bullet points for deep analysis in Chinese.
+    ```
+- **Key Rules**:
+    - **Hacker News (HN)**: For HN items, you **MUST** provide the link to the HN discussion page (comments) in addition to the original article link.
+    - **Translation**: Translate titles, summaries, and deep dive analysis into **Simplified Chinese**.
+    - **Title**: MUST be a clickable link. Do NOT use plain text titles.
+    - **Metadata**: Source, Time, and Heat MUST be visible immediately below the title.
+    - **Time**: Ensure the "Time" field is populated (e.g., "2 hours ago", "2024-01-20").
     - **Deep Interpretation (Bulleted)**: 2-3 bullet points explaining *why* this matters, technical details, or context. (Required for "Deep Scan").
 
 **Output Artifact:**
-- Always save the full report to `reports/` directory with a timestamped filename (e.g., `reports/hn_news_YYYYMMDD_HHMM.md`).
+- Always save the full report to a date-based subdirectory in `reports/` (e.g., `reports/YYYY-MM-DD/filename_HHMM.md`). If the directory does not exist, you MUST create it first.
+- **IMPORTANT**: The Agent (You) are responsible for formatting the JSON output into Markdown. **Do not rely on external scripts for summarization.**
 - Present the full report content to the user in the chat.

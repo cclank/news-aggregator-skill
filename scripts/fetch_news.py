@@ -100,6 +100,7 @@ def fetch_hackernews(limit=5, keyword=None):
                     "source": "Hacker News", 
                     "title": title, 
                     "url": link, 
+                    "hn_url": f"{base_url}/item?id={id_}",
                     "heat": score,
                     "time": time_str
                 })
@@ -262,8 +263,7 @@ def fetch_producthunt(limit=5, keyword=None):
     try:
         # Using RSS for speed and reliability without API key
         response = requests.get("https://www.producthunt.com/feed", headers=HEADERS, timeout=10)
-        soup = BeautifulSoup(response.text, 'xml')
-        if not soup.find('item'): soup = BeautifulSoup(response.text, 'html.parser')
+        soup = BeautifulSoup(response.text, 'html.parser')
         
         items = []
         for entry in soup.find_all(['item', 'entry']):

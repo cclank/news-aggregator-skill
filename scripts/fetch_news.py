@@ -61,6 +61,55 @@ def enrich_items_with_content(items, max_workers=10):
 # --- Source Fetchers ---
 
 def fetch_hackernews(limit=5, keyword=None):
+    if keyword:
+        # Use Algolia API for keyword search (Much better recall for specific topics like "AI")
+        try:
+            # 24h window
+            timestamp_24h = int(time.time() - 24 * 3600)
+            
+            # Query builder strategy
+            raw_keywords = [k.strip() for k in keyword.split(',')]
+            
+            # 1. Try Complex Query with Quoted Phrases
+            # "Github Copilot" needs quotes in Algolia search string if mixed with OR
+            quoted_keywords = [f'"{k}"' if ' ' in k else k for k in raw_keywords]
+            query_str = " OR ".join(quoted_keywords)
+            
+            api_url = f"http://hn.algolia.com/api/v1/search_by_date?tags=story&numericFilters=created_at_i>{timestamp_24h}&hitsPerPage={limit*2}&query={requests.utils.quote(query_str)}"
+            
+            data = requests.get(api_url, timeout=10).json()
+            hits = data.get('hits', [])
+            
+            # 2. Level 2 Fallback: If 0 results, try just the first keyword (usually the most broad, e.g. "AI")
+            if not hits and raw_keywords:
+                simple_query = raw_keywords[0]
+                api_url_simple = f"http://hn.algolia.com/api/v1/search_by_date?tags=story&numericFilters=created_at_i>{timestamp_24h}&hitsPerPage={limit*2}&query={requests.utils.quote(simple_query)}"
+                data = requests.get(api_url_simple, timeout=10).json()
+                hits = data.get('hits', [])
+
+            items = []
+            for hit in hits:
+                items.append({
+                    "source": "Hacker News",
+                    "title": hit.get('title'),
+                    "url": hit.get('url') or f"https://news.ycombinator.com/item?id={hit['objectID']}",
+                    "hn_url": f"https://news.ycombinator.com/item?id={hit['objectID']}",
+                    "heat": f"{hit.get('points', 0)} points",
+                    "time": "Today" # Algolia return is recent by definition of filter
+                })
+            
+            # Only return if we actually found something. 
+            # If we found nothing after all attempts, we might want to fall back to scraping frontpage 
+            # but frontpage is unlikely to have keyword matches if deep search failed. 
+            # However, returning [] is better than hallucinating.
+            return items[:limit]
+            
+        except Exception as e:
+            print(f"HN Algolia failed: {e}", file=sys.stderr)
+            # Fallback to scraping logic below if API completely errors out (e.g. network/timeout)
+            pass
+
+    # Fallback / Default: Scrape Front Page
     base_url = "https://news.ycombinator.com"
     news_items = []
     page = 1
@@ -152,6 +201,42 @@ def fetch_weibo(limit=5, keyword=None):
         return []
 
 def fetch_github(limit=5, keyword=None):
+    if keyword:
+         # Use GitHub Search for keywords
+         query = f"{keyword.split(',')[0]} sort:updated" # Use first kw as primary
+         url = f"https://github.com/search?q={requests.utils.quote(query)}&type=repositories"
+         # Note: GitHub Search page is hard to scrape due to login requirements (often).
+         # Fallback strat: Topics? "https://github.com/topics/{kw}?o=desc&s=updated"
+         topic_url = f"https://github.com/topics/{keyword.split(',')[0].strip()}?o=desc&s=updated"
+         try:
+             response = requests.get(topic_url, headers=HEADERS, timeout=10)
+             if response.status_code == 200:
+                soup = BeautifulSoup(response.text, 'html.parser')
+                items = []
+                for article in soup.select('article.border'):
+                     # Topic page structure changes often, but let's try generic selector
+                     h3 = article.select_one('h3 a') 
+                     # Actually standard topic page: <h3 class="f3"><a href="/user/repo">...
+                     if not h3: continue
+                     repo_link = h3['href'] # /user/repo
+                     title = repo_link.strip('/')
+                     link = "https://github.com" + repo_link
+                     
+                     desc = ""
+                     desc_div = article.select_one('.color-fg-muted')
+                     if desc_div: desc = desc_div.get_text(strip=True)
+                     
+                     items.append({
+                        "source": "GitHub Trending", 
+                        "title": f"{title} - {desc}", 
+                        "url": link,
+                        "heat": "Topic Match",
+                        "time": "Updated recently"
+                     })
+                if items: return items[:limit]
+         except: pass
+
+    # Default Trending
     try:
         response = requests.get("https://github.com/trending", headers=HEADERS, timeout=10)
     except: return []
@@ -249,7 +334,7 @@ def fetch_wallstreetcn(limit=5, keyword=None):
             res = item.get('resource')
             if res and (res.get('title') or res.get('content_short')):
                  ts = res.get('display_time', 0)
-                 time_str = datetime.fromtimestamp(ts).strftime('%H:%M') if ts else ""
+                 time_str = datetime.fromtimestamp(ts).strftime('%Y-%m-%d %H:%M') if ts else ""
                  items.append({
                      "source": "Wall Street CN", 
                      "title": res.get('title') or res.get('content_short'), 
@@ -308,11 +393,51 @@ def main():
             if s in sources_map: to_run.append(sources_map[s])
             
     results = []
-    for func in to_run:
-        try:
-            results.extend(func(args.limit, args.keyword))
-        except: pass
+    
+    def run_fetchers(fetchers, limit, kw):
+        res = []
+        for func in fetchers:
+            try:
+                res.extend(func(limit, kw))
+            except: pass
+        return res
+
+    # Primary Fetch
+    results = run_fetchers(to_run, args.limit, args.keyword)
         
+    # Smart Fill Logic (Only if keyword is used and results are sparse)
+    MIN_ITEMS = 5
+    if args.keyword and len(results) < MIN_ITEMS:
+        sys.stderr.write(f"Smart Fill triggered: Found {len(results)} items, filling gaps...\n")
+        
+        # Secondary Fetch (Broad, no keyword)
+        # We fetch enough to potentially fill the gap, limit=MIN_ITEMS is a safe bet for each source
+        fill_limit = MIN_ITEMS 
+        fill_results = run_fetchers(to_run, limit=fill_limit, kw=None)
+        
+        # Deduplicate and Append
+        existing_urls = {item.get('url') for item in results}
+        existing_titles = {item.get('title') for item in results}
+        
+        for item in fill_results:
+            if len(results) >= MIN_ITEMS:
+                break
+                
+            u = item.get('url')
+            t = item.get('title')
+            
+            if u not in existing_urls and t not in existing_titles:
+                # Mark as smart fill
+                item['smart_fill'] = True
+                
+                # Add warning to time field as per SKILL.md
+                if 'time' in item:
+                    item['time'] = f"⚠️ {item['time']}"
+                
+                results.append(item)
+                existing_urls.add(u)
+                existing_titles.add(t)
+
     if args.deep and results:
         sys.stderr.write(f"Deep fetching content for {len(results)} items...\n")
         results = enrich_items_with_content(results)

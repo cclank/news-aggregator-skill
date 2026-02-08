@@ -95,6 +95,14 @@ PROFILES = {
             "sources": [(fetch_v2ex, 30, None)],
             "enrich": True # Content is fun
         }
+    },
+
+    # 5. GitHub Trending (Github Only)
+    "github": {
+        "github_trending": {
+            "sources": [(fetch_github, 20, None)],
+            "enrich": True
+        }
     }
 }
 

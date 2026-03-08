@@ -421,6 +421,68 @@ def fetch_huggingface_papers(limit=5, keyword=None):
     return filter_items(items[:limit], keyword)
 
 
+def fetch_latentspace_ainews(limit=5, keyword=None):
+    """Fetch AINews daily roundups from Latent Space Substack RSS.
+    Filters for posts with [AINews] title prefix, separating them from podcast episodes."""
+    items = []
+    try:
+        response = requests.get("https://www.latent.space/feed", headers=HEADERS, timeout=15)
+        response.raise_for_status()
+        soup = BeautifulSoup(response.text, 'html.parser')
+        
+        for entry in soup.find_all('item'):
+            title_tag = entry.find('title')
+            if not title_tag:
+                continue
+            title = title_tag.get_text(strip=True)
+            
+            # Filter: only AINews posts (title starts with [AINews])
+            if not title.startswith('[AINews]'):
+                continue
+            
+            # Extract link from guid (Substack RSS has link text empty, guid has the URL)
+            guid_tag = entry.find('guid')
+            link = guid_tag.get_text(strip=True) if guid_tag else ""
+            
+            # Fallback: try link tag
+            if not link:
+                link_tag = entry.find('link')
+                if link_tag:
+                    link = link_tag.get_text(strip=True) or (link_tag.get('href') or '')
+            
+            # Publication date
+            pub_tag = entry.find('pubdate') or entry.find('published')
+            pub_date = pub_tag.get_text(strip=True) if pub_tag else ""
+            # Simplify date if possible
+            try:
+                from email.utils import parsedate_to_datetime
+                dt = parsedate_to_datetime(pub_date)
+                pub_date = dt.strftime('%Y-%m-%d')
+            except Exception:
+                pass
+            
+            # Content snippet from description
+            desc_tag = entry.find('description')
+            content = ""
+            if desc_tag:
+                desc_html = desc_tag.get_text(strip=True)
+                desc_soup = BeautifulSoup(desc_html, 'html.parser')
+                content = desc_soup.get_text(separator=' ', strip=True)[:2000]
+            
+            items.append({
+                "source": "Latent Space AINews",
+                "title": title,
+                "url": link,
+                "time": pub_date,
+                "heat": "Daily Roundup",
+                "content": content
+            })
+    except Exception as e:
+        print(f"Latent Space AINews fetch error: {e}", file=sys.stderr)
+    
+    return filter_items(items[:limit], keyword)
+
+
 # --- Source Definitions (Global for Access) ---
 
 AI_NEWSLETTER_SOURCES = [
@@ -560,7 +622,9 @@ def main():
         # Aggregates
         'huggingface': fetch_huggingface_papers,
         'ai_newsletters': fetch_ai_newsletters, 'podcasts': fetch_podcasts,
-        'essays': fetch_essays
+        'essays': fetch_essays,
+        # Standalone AI Sources
+        'latentspace_ainews': fetch_latentspace_ainews,
     }
 
     # Dynamic Registration of Sub-sources

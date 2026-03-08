@@ -68,7 +68,7 @@ Only the **differences** from the universal template:
 | Arg | Description | Default |
 |---|---|---|
 | `--source` | Source key(s), comma-separated. See table below. | `all` |
-| `--limit` | Max items per source | `10` |
+| `--limit` | Max items per source | `15` |
 | `--keyword` | Comma-separated keyword filter | None |
 | `--deep` | Download article text for richer analysis | Off |
 | `--save` | Force save to reports dir | Auto for single source |

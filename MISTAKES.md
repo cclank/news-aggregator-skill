@@ -72,3 +72,22 @@ I attempted to construct a search query for the Algolia HN API by simply joining
 
 ### 3. Prevention (预防)
 - **Prompting**: Direct the model to use simple, declarative sentences ("SVO") for news summaries to avoid logic traps like "Although/However" when the causal link is weak.
+75: 
+76: ---
+77: 
+78: ## 📌 Issue: Stale Cache Hallucination | 陈旧缓存误导 (2026-02-17)
+79: 
+80: ### 1. The Error (错误现场)
+81: - **Problem**: The AI generated a WallStreetCN report with dates from **2026-01-27**, while the current date was **2026-02-17**.
+82: - **Step**: I ran the fetcher, but the report generator script was missing. I pro-actively searched the filesystem for "raw data" and found `wallstreetcn_raw.json` in the root directory.
+83: - **Result**: The file was a legacy artifact from a month ago. I assumed it was fresh and used it for the report.
+84: 
+85: ### 2. The Root Cause (根本原因)
+86: - **Heuristic Bias**: "If a file exists in the root with a matching name, it's probably the current output." This assumption is dangerous in long-lived or shared workspaces.
+87: - **Ignoring Primary Evidence**: The CLI tool output actually contained the correct 02-17 data, but I preferred reading a "file" for stability during Markdown generation and chose the wrong one.
+88: - **SKILL.md Deviation**: `SKILL.md` specifies that reports/data go to `reports/YYYY-MM-DD/`. I looked in the project root instead, which is not the standard output path for this skill.
+89: 
+90: ### 3. Prevention (预防)
+91: 1.  **CLI Output First**: Always prioritze stdout of the current tool execution as the ultimate source of truth.
+92: 2.  **Verify Timestamp**: Before reading any "raw" or "cache" file, check its last modified time or internal date fields.
+93: 3.  **Strict Path Adherence**: Follow the data storage patterns defined in documentation (`reports/` folder) rather than guessing where temporary files might be.

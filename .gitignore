@@ -42,3 +42,19 @@ Thumbs.db
 # Generated Data and Reports
 *.json
 reports/
+test_results/
+
+# Playwright / Testing
+playwright-report/
+test-results/
+
+# Environments
+.env
+.env.*
+!.env.example
+
+# IDEs
+.idea/
+.vscode/
+*.swp
+*.swo

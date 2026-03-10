@@ -33,6 +33,17 @@ Outputs:
 - `reports/manual/ai_daily_full.json`
 - `reports/manual/ai_daily_full.md`
 
+## Full GitHub Briefing
+
+```bash
+cd /Users/qihan/.openclaw/workspace/news-aggregator-skill
+bash scripts/run_full_github_local.sh
+```
+
+Outputs:
+- `reports/manual/github_full.json`
+- `reports/manual/github_full.md`
+
 ## OpenClaw handoff wrapper
 
 If you want OpenClaw to send Telegram after a full local run, use this wrapper:

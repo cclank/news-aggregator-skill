@@ -122,6 +122,12 @@ cd /Users/qihan/.openclaw/workspace/news-aggregator-skill
 bash scripts/run_full_briefing_local.sh ai_daily --deep-top-n 5 --max-age-minutes 2880
 ```
 
+#### Full GitHub Briefing
+```bash
+cd /Users/qihan/.openclaw/workspace/news-aggregator-skill
+bash scripts/run_full_github_local.sh
+```
+
 Outputs will be written to `reports/manual/` by default.
 
 ### 4. 🧱 CLI Hardening

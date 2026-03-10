@@ -16,6 +16,10 @@
 - **🆓 开箱即用 (Zero-Config)**：纯净抓取，**无需配置任何第三方 API Key**，告别繁琐的环境变量和额度焦虑。
 - **🧠 AI 智能深度阅读 (Deep Fetch)**：智能穿透防爬虫机制（内置 Playwright 绕过 Cloudflare），抓取完整正文内容交给大模型过滤、提炼与总结。
 - **📰 场景化早报 (Daily Briefings)**：内置多套场景预设（综合早报、财经早报、科技早报、吃瓜早报、AI深度日报），一键生成杂志级排版的 Markdown 中文报告。
+- **🗂️ 外置 Profile 配置**：早报 profile 现存放于 `profiles/*.json`，默认 profile 名称与行为保持兼容，便于 OpenClaw 侧配置化管理。
+- **📨 Telegram 友好输出**：支持 `--format telegram` 输出更短的 Markdown，适合 Telegram 或其它消息推送渠道。
+- **🩺 信源健康状态**：每次运行都会更新健康状态 JSON，记录 `last_ok_at`、`last_error_at`、`last_error`、`consecutive_errors`。
+- **🔗 轻量 Canonical 去重**：基础 URL 归一化与去重内置在运行路径中，减少重复内容与 tracking 链接噪音。
 - **🪄 魔法交互菜单**：支持通过专属口令唤醒全局交互式菜单，告别繁琐长难句，只需输入序号即可指哪打哪。
 
 ---
@@ -102,13 +106,33 @@ playwright install chromium
 - **硬核科研**："看看今天 HuggingFace 有什么新发的神仙论文？"
 - **自由组合**："帮我把 Hacker News, 华尔街见闻 和 微博热搜 今天的前十条揉在一起生成一个早报。"
 
-### 3. 🧱 CLI Hardening
+### 3. 🖥️ Local Full Briefing (Recommended for Heavy Jobs)
+
+For heavy full-briefing runs, prefer local execution over OpenClaw cron agentTurn.
+
+#### Full Tech Briefing
+```bash
+cd /Users/qihan/.openclaw/workspace/news-aggregator-skill
+bash scripts/run_full_briefing_local.sh tech --deep-top-n 3 --max-age-minutes 1440
+```
+
+#### Full AI Daily
+```bash
+cd /Users/qihan/.openclaw/workspace/news-aggregator-skill
+bash scripts/run_full_briefing_local.sh ai_daily --deep-top-n 5 --max-age-minutes 2880
+```
+
+Outputs will be written to `reports/manual/` by default.
+
+### 4. 🧱 CLI Hardening
 
 `scripts/fetch_news.py` 与 `scripts/daily_briefing.py` 现在共享一套输出与退出码约定：
 
 - `--json-out <path>`: 将完整运行结果写入 JSON 文件
 - `--md-out <path>`: 将本次运行写入 Markdown 摘要
 - `--stdout-summary`: 在 stdout 打印单行 JSON 摘要，适合 OpenClaw / shell wrapper
+- `--format full|telegram`: Markdown 输出格式，`telegram` 更适合消息推送
+- `--health-out <path>`: 写入稳定的信源健康状态 JSON
 - `--max-age-minutes <n>`: 过滤掉可识别发布时间且超过 `n` 分钟的条目
 - `--deep-top-n <n>`: 仅对前 `n` 条结果执行 Deep Fetch
 
@@ -137,6 +161,23 @@ playwright install chromium
 - `published_at_iso`
 - `fetched_at`
 - `age_minutes`
+- `canonical_url`
+
+健康状态文件的核心字段：
+
+- `updated_at`
+- `sources.<source_key>.last_ok_at`
+- `sources.<source_key>.last_error_at`
+- `sources.<source_key>.last_error`
+- `sources.<source_key>.consecutive_errors`
+
+Canonical 化 / 去重行为：
+
+- 去掉 URL fragment
+- 移除常见 tracking 参数，如 `utm_*`、`fbclid`、`gclid`
+- 统一 host 大小写并清理默认端口 / 多余尾斜杠
+- 优先用 `canonical_url`，其次用标准化标题做轻量去重
+- `fetch_news.py` 对当前聚合结果去重，`daily_briefing.py` 在各 section 内去重
 
 OpenClaw wrapper:
 
@@ -148,6 +189,32 @@ scripts/openclaw_run_briefing.sh general
 
 - `reports/openclaw/<profile>_briefing.json`
 - `reports/openclaw/<profile>_briefing.md`
+- `reports/openclaw/source_health.json`
+
+Telegram 模式示例：
+
+```bash
+python3 scripts/fetch_news.py --source hackernews,github --format telegram --md-out /tmp/scan_telegram.md
+python3 scripts/daily_briefing.py --profile general --format telegram --md-out /tmp/general_telegram.md
+scripts/openclaw_run_briefing.sh general --format telegram
+```
+
+`daily_briefing.py` 的 profile 定义现位于 `profiles/*.json`。单个 profile 文件结构如下：
+
+```json
+{
+  "name": "general",
+  "sections": {
+    "global_scan": {
+      "enrich": true,
+      "sources": [
+        { "source": "hackernews", "limit": 5 },
+        { "source": "github", "limit": 5, "keyword": "AI,LLM,GPT" }
+      ]
+    }
+  }
+}
+```
 
 ---
 

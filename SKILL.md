@@ -26,6 +26,9 @@ python3 scripts/fetch_news.py --source all --limit 15 --deep --no-save
 
 # With keyword filter (auto-expand: "AI" → "AI,LLM,GPT,Claude,Agent,RAG")
 python3 scripts/fetch_news.py --source hackernews --keyword "AI,LLM,GPT" --deep --no-save
+
+# Machine-friendly run output
+python3 scripts/fetch_news.py --source hackernews --json-out /tmp/hn.json --md-out /tmp/hn.md --stdout-summary
 ```
 
 ### Step 2: Generate Report
@@ -71,8 +74,13 @@ Only the **differences** from the universal template:
 | `--limit` | Max items per source | `15` |
 | `--keyword` | Comma-separated keyword filter | None |
 | `--deep` | Download article text for richer analysis | Off |
+| `--deep-top-n` | Only deep-enrich the first N items | All items |
+| `--max-age-minutes` | Filter out stale items when publish time is parseable | None |
 | `--save` | Force save to reports dir | Auto for single source |
 | `--outdir` | Custom output directory | `reports/YYYY-MM-DD/` |
+| `--json-out` | Write full run payload JSON to a fixed path | None |
+| `--md-out` | Write Markdown summary to a fixed path | None |
+| `--stdout-summary` | Print one-line JSON summary instead of full payload | Off |
 
 ### Available Sources (28)
 
@@ -113,6 +121,8 @@ Pre-configured multi-source profiles:
 
 ```bash
 python3 scripts/daily_briefing.py --profile <profile>
+python3 scripts/daily_briefing.py --profile general --json-out /tmp/general.json --md-out /tmp/general.md --stdout-summary
+scripts/openclaw_run_briefing.sh general
 ```
 
 | Profile | Sources | Instruction File |
@@ -125,6 +135,34 @@ python3 scripts/daily_briefing.py --profile <profile>
 | `reading_list` | Essays, Podcasts | (Use universal template) |
 
 **Workflow**: Execute script → Read corresponding instruction file → Generate report following both the instruction file AND the universal template.
+
+### Unified Output Contract
+
+Both entrypoints now emit a top-level run envelope:
+
+- `run_at`
+- `source` or `profile`
+- `status`
+- `sources_total`
+- `sources_ok`
+- `sources_failed`
+- `failed_sources`
+- `items`
+
+Each item may include:
+
+- `published_at_raw`
+- `published_at_iso`
+- `fetched_at`
+- `age_minutes`
+
+### Unified Exit Codes
+
+- `0`: success with results
+- `10`: success but empty results
+- `20`: partial success, output generated, some sources failed
+- `50`: critical failure
+- `60`: timeout or missing dependency/environment
 
 ---
 

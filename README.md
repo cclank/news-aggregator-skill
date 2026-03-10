@@ -102,6 +102,53 @@ playwright install chromium
 - **硬核科研**："看看今天 HuggingFace 有什么新发的神仙论文？"
 - **自由组合**："帮我把 Hacker News, 华尔街见闻 和 微博热搜 今天的前十条揉在一起生成一个早报。"
 
+### 3. 🧱 CLI Hardening
+
+`scripts/fetch_news.py` 与 `scripts/daily_briefing.py` 现在共享一套输出与退出码约定：
+
+- `--json-out <path>`: 将完整运行结果写入 JSON 文件
+- `--md-out <path>`: 将本次运行写入 Markdown 摘要
+- `--stdout-summary`: 在 stdout 打印单行 JSON 摘要，适合 OpenClaw / shell wrapper
+- `--max-age-minutes <n>`: 过滤掉可识别发布时间且超过 `n` 分钟的条目
+- `--deep-top-n <n>`: 仅对前 `n` 条结果执行 Deep Fetch
+
+统一退出码：
+
+- `0`: 成功且有结果
+- `10`: 成功但结果为空
+- `20`: 部分成功，已有输出，但部分信源失败
+- `50`: 严重失败
+- `60`: 超时或缺少依赖/运行环境
+
+统一 JSON 顶层字段：
+
+- `run_at`
+- `source` 或 `profile`
+- `status`
+- `sources_total`
+- `sources_ok`
+- `sources_failed`
+- `failed_sources`
+- `items`
+
+每个条目现在尽量带上 freshness 字段：
+
+- `published_at_raw`
+- `published_at_iso`
+- `fetched_at`
+- `age_minutes`
+
+OpenClaw wrapper:
+
+```bash
+scripts/openclaw_run_briefing.sh general
+```
+
+它会在存在时自动激活仓库内 `.venv` / `venv`，并固定写入：
+
+- `reports/openclaw/<profile>_briefing.json`
+- `reports/openclaw/<profile>_briefing.md`
+
 ---
 
 ## 💡 开发与扩展
@@ -109,5 +156,3 @@ playwright install chromium
 欢迎提交 PR 为框架接入新的全球优质信源。我们期望共建一个**最纯净、最高效、抗干扰**的防降智信息获取舱。
 
 📝 **License**: MIT License
-
-

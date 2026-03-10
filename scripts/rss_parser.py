@@ -1,23 +1,29 @@
 
 import sys
-import requests
-from bs4 import BeautifulSoup
-import urllib3
-import re
-from datetime import datetime
+MISSING_DEPENDENCY_ERROR = None
+try:
+    import urllib3
+    import requests
+    from bs4 import BeautifulSoup
+except ModuleNotFoundError as exc:
+    MISSING_DEPENDENCY_ERROR = exc
+    requests = None
+    BeautifulSoup = None
 
-# Suppress insecure request warnings
-urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+if MISSING_DEPENDENCY_ERROR is None:
+    urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 def clean_text(text):
     if not text: return ""
     return text.strip()
 
-def parse_rss_content(content, source_name, limit=5):
+def parse_rss_content(content, source_name, limit=5, error_callback=None):
     """
     Parses RSS/Atom content string (XML or HTML) and returns items.
     """
     try:
+        if MISSING_DEPENDENCY_ERROR is not None:
+            raise RuntimeError(f"Missing dependency: {MISSING_DEPENDENCY_ERROR.name}")
         # Use html.parser which is built-in and lenient 
         soup = BeautifulSoup(content, 'html.parser')
         
@@ -83,15 +89,19 @@ def parse_rss_content(content, source_name, limit=5):
             
         return items
     except Exception as e:
+        if error_callback:
+            error_callback(source_name, e)
         print(f"Content Parse failed: {e}", file=sys.stderr)
         return []
 
-def fetch_rss_feed(url, source_name, limit=5):
+def fetch_rss_feed(url, source_name, limit=5, error_callback=None):
     """
     Robust RSS/Atom fetcher using BeautifulSoup.
     Handles various feed formats (RSS 2.0, Atom, etc.)
     """
     try:
+        if MISSING_DEPENDENCY_ERROR is not None:
+            raise RuntimeError(f"Missing dependency: {MISSING_DEPENDENCY_ERROR.name}")
         # User-Agent is critical
         headers = {
             "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
@@ -101,8 +111,10 @@ def fetch_rss_feed(url, source_name, limit=5):
         response = requests.get(url, headers=headers, timeout=15, verify=False)
         response.encoding = response.apparent_encoding or 'utf-8'
         
-        return parse_rss_content(response.content, source_name, limit)
+        return parse_rss_content(response.content, source_name, limit, error_callback=error_callback)
 
     except Exception as e:
+        if error_callback:
+            error_callback(source_name, e)
         print(f"RSS Fetch failed for {url}: {e}", file=sys.stderr)
         return []

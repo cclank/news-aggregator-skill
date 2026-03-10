@@ -1,23 +1,374 @@
 import argparse
 import json
-import requests
-from bs4 import BeautifulSoup
 import sys
 import time
 import re
 import concurrent.futures
 import os
-from datetime import datetime
+import threading
+from datetime import datetime, timedelta, timezone
+from email.utils import parsedate_to_datetime
 import subprocess
+
+MISSING_DEPENDENCY_ERROR = None
+try:
+    import requests
+    from bs4 import BeautifulSoup
+    from bs4 import XMLParsedAsHTMLWarning
+except ModuleNotFoundError as exc:
+    MISSING_DEPENDENCY_ERROR = exc
+    requests = None
+    BeautifulSoup = None
 
 # Headers for scraping to avoid basic bot detection
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
 }
 
-from bs4 import XMLParsedAsHTMLWarning
-import warnings
-warnings.filterwarnings("ignore", category=XMLParsedAsHTMLWarning)
+if MISSING_DEPENDENCY_ERROR is None:
+    import warnings
+    warnings.filterwarnings("ignore", category=XMLParsedAsHTMLWarning)
+
+EXIT_SUCCESS = 0
+EXIT_EMPTY = 10
+EXIT_PARTIAL = 20
+EXIT_CRITICAL_FAILURE = 50
+EXIT_TIMEOUT_OR_ENV = 60
+
+LOCAL_TZ = datetime.now().astimezone().tzinfo
+SOURCE_ERRORS = []
+SOURCE_ERRORS_LOCK = threading.Lock()
+
+SOURCE_DISPLAY_NAMES = {
+    "fetch_hackernews": "Hacker News",
+    "fetch_weibo": "Weibo Hot Search",
+    "fetch_github": "GitHub Trending",
+    "fetch_36kr": "36Kr",
+    "fetch_v2ex": "V2EX",
+    "fetch_tencent": "Tencent News",
+    "fetch_wallstreetcn": "Wall Street CN",
+    "fetch_producthunt": "Product Hunt",
+    "fetch_huggingface_papers": "HF Papers",
+    "fetch_ai_newsletters": "AI Newsletters",
+    "fetch_podcasts": "Podcasts",
+    "fetch_essays": "Essays",
+    "fetch_latentspace_ainews": "Latent Space AINews",
+}
+
+
+def now_utc():
+    return datetime.now(timezone.utc)
+
+
+def to_iso(dt):
+    if dt is None:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=LOCAL_TZ)
+    return dt.astimezone(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+
+def classify_error(exc):
+    if isinstance(exc, subprocess.TimeoutExpired):
+        return "timeout"
+    if MISSING_DEPENDENCY_ERROR and isinstance(exc, type(MISSING_DEPENDENCY_ERROR)):
+        return "env"
+    if requests is not None and isinstance(exc, requests.exceptions.Timeout):
+        return "timeout"
+    if isinstance(exc, (ModuleNotFoundError, ImportError, FileNotFoundError, OSError)):
+        return "env"
+    return "error"
+
+
+def record_source_error(source_name, error, code=None, context=None):
+    detail = {
+        "source": source_name,
+        "error": str(error),
+        "code": code or classify_error(error),
+    }
+    if context:
+        detail.update(context)
+    with SOURCE_ERRORS_LOCK:
+        SOURCE_ERRORS.append(detail)
+    print(f"[source-error] {source_name}: {detail['error']}", file=sys.stderr)
+
+
+def clear_source_errors():
+    with SOURCE_ERRORS_LOCK:
+        SOURCE_ERRORS.clear()
+
+
+def get_recorded_source_errors():
+    with SOURCE_ERRORS_LOCK:
+        return [dict(item) for item in SOURCE_ERRORS]
+
+
+def dedupe_failed_sources(items):
+    seen = set()
+    unique = []
+    for item in items:
+        key = (
+            item.get("section"),
+            item.get("source_key"),
+            item.get("source"),
+            item.get("error"),
+            item.get("code"),
+        )
+        if key in seen:
+            continue
+        seen.add(key)
+        unique.append(item)
+    return unique
+
+
+def ensure_runtime_available():
+    if MISSING_DEPENDENCY_ERROR is not None:
+        raise RuntimeError(f"Missing dependency: {MISSING_DEPENDENCY_ERROR.name}")
+
+
+def source_display_name(func, fallback=None):
+    return SOURCE_DISPLAY_NAMES.get(getattr(func, "__name__", ""), fallback or getattr(func, "__name__", "unknown"))
+
+
+def sanitize_filename(value):
+    return "".join([c if c.isalnum() else "_" for c in value]).strip("_").lower() or "output"
+
+
+def parse_relative_time(raw):
+    match = re.match(r"(?i)^\s*(\d+)\s+(minute|minutes|hour|hours|day|days)\s+ago\s*$", raw)
+    if not match:
+        return None
+    amount = int(match.group(1))
+    unit = match.group(2).lower()
+    if "minute" in unit:
+        delta = timedelta(minutes=amount)
+    elif "hour" in unit:
+        delta = timedelta(hours=amount)
+    else:
+        delta = timedelta(days=amount)
+    return now_utc() - delta
+
+
+def parse_published_datetime(value):
+    if value in (None, ""):
+        return None
+    if isinstance(value, (int, float)):
+        timestamp = float(value)
+        if timestamp > 10**12:
+            timestamp = timestamp / 1000.0
+        return datetime.fromtimestamp(timestamp, tz=timezone.utc)
+
+    raw = str(value).strip()
+    if raw.startswith("⚠️"):
+        raw = raw.lstrip("⚠️").strip()
+    if not raw:
+        return None
+    lowered = raw.lower()
+    if lowered in {"today", "real-time", "hot", "updated recently", "recent"}:
+        return None
+
+    relative_dt = parse_relative_time(raw)
+    if relative_dt is not None:
+        return relative_dt
+
+    if re.fullmatch(r"\d{10,13}", raw):
+        return parse_published_datetime(int(raw))
+
+    try:
+        parsed = parsedate_to_datetime(raw)
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=LOCAL_TZ)
+        return parsed
+    except Exception:
+        pass
+
+    iso_candidate = raw.replace("Z", "+00:00")
+    try:
+        parsed = datetime.fromisoformat(iso_candidate)
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=LOCAL_TZ)
+        return parsed
+    except Exception:
+        pass
+
+    for fmt in ("%Y-%m-%d %H:%M", "%Y-%m-%d", "%Y/%m/%d %H:%M", "%Y/%m/%d"):
+        try:
+            parsed = datetime.strptime(raw, fmt)
+            return parsed.replace(tzinfo=LOCAL_TZ)
+        except ValueError:
+            continue
+    return None
+
+
+def annotate_item(item, fetched_at):
+    normalized = dict(item)
+    published_raw = normalized.get("published_at_raw", normalized.get("time"))
+    published_dt = parse_published_datetime(published_raw)
+    normalized["published_at_raw"] = published_raw if published_raw not in ("", None) else None
+    normalized["published_at_iso"] = to_iso(published_dt)
+    normalized["fetched_at"] = to_iso(fetched_at)
+    if published_dt is None:
+        normalized["age_minutes"] = None
+    else:
+        age_seconds = (fetched_at - published_dt.astimezone(timezone.utc)).total_seconds()
+        normalized["age_minutes"] = max(int(age_seconds // 60), 0)
+    return normalized
+
+
+def annotate_items(items, fetched_at):
+    return [annotate_item(item, fetched_at) for item in items]
+
+
+def filter_items_by_age(items, max_age_minutes):
+    if max_age_minutes is None:
+        return items
+    filtered = []
+    dropped = 0
+    for item in items:
+        age_minutes = item.get("age_minutes")
+        if age_minutes is not None and age_minutes > max_age_minutes:
+            dropped += 1
+            continue
+        filtered.append(item)
+    if dropped:
+        print(f"Filtered {dropped} item(s) older than {max_age_minutes} minutes", file=sys.stderr)
+    return filtered
+
+
+def apply_deep_enrichment(items, deep_top_n=None, max_workers=10):
+    if not items:
+        return items
+    if deep_top_n is None:
+        enrich_items_with_content(items, max_workers=max_workers)
+        return items
+    limit = max(int(deep_top_n), 0)
+    if limit == 0:
+        return items
+    enrich_items_with_content(items[:limit], max_workers=max_workers)
+    return items
+
+
+def count_items(items):
+    if isinstance(items, dict):
+        return sum(len(section_items) for section_items in items.values())
+    return len(items)
+
+
+def determine_status_and_exit_code(item_count, failed_sources):
+    if item_count > 0:
+        if failed_sources:
+            return "partial", EXIT_PARTIAL
+        return "success", EXIT_SUCCESS
+    if failed_sources:
+        if any(item.get("code") in {"timeout", "env"} for item in failed_sources):
+            return "timeout_or_env", EXIT_TIMEOUT_OR_ENV
+        return "critical_failure", EXIT_CRITICAL_FAILURE
+    return "empty", EXIT_EMPTY
+
+
+def write_json_file(payload, path):
+    directory = os.path.dirname(path)
+    if directory:
+        os.makedirs(directory, exist_ok=True)
+    with open(path, "w", encoding="utf-8") as handle:
+        json.dump(payload, handle, indent=2, ensure_ascii=False)
+
+
+def render_markdown_report(payload):
+    lines = [
+        "# News Aggregator Run",
+        "",
+        f"- run_at: {payload.get('run_at', '')}",
+        f"- status: {payload.get('status', '')}",
+        f"- sources_total: {payload.get('sources_total', 0)}",
+        f"- sources_ok: {payload.get('sources_ok', 0)}",
+        f"- sources_failed: {payload.get('sources_failed', 0)}",
+    ]
+    if "source" in payload:
+        lines.append(f"- source: {payload.get('source')}")
+    if "profile" in payload:
+        lines.append(f"- profile: {payload.get('profile')}")
+
+    failed_sources = payload.get("failed_sources") or []
+    if failed_sources:
+        lines.extend(["", "## Failed Sources", ""])
+        for item in failed_sources:
+            section = f" section={item['section']}" if item.get("section") else ""
+            lines.append(
+                f"- {item.get('source', item.get('source_key', 'unknown'))}{section}: [{item.get('code', 'error')}] {item.get('error', '')}"
+            )
+
+    lines.extend(["", "## Items", ""])
+    items = payload.get("items", [])
+    if isinstance(items, dict):
+        for section, section_items in items.items():
+            lines.extend([f"### {section}", ""])
+            if not section_items:
+                lines.append("- No items")
+                lines.append("")
+                continue
+            for index, item in enumerate(section_items, start=1):
+                lines.extend(render_markdown_item(index, item))
+                lines.append("")
+    else:
+        if not items:
+            lines.append("- No items")
+        for index, item in enumerate(items, start=1):
+            lines.extend(render_markdown_item(index, item))
+            lines.append("")
+    return "\n".join(lines).rstrip() + "\n"
+
+
+def render_markdown_item(index, item):
+    title = item.get("title") or "(untitled)"
+    url = item.get("url") or ""
+    header = f"{index}. **{title}**"
+    if url:
+        header = f"{index}. [{title}]({url})"
+    parts = [header]
+    meta = [
+        f"source={item.get('source', 'Unknown')}",
+        f"time={item.get('time', 'Unknown Time') or 'Unknown Time'}",
+    ]
+    if item.get("age_minutes") is not None:
+        meta.append(f"age_minutes={item['age_minutes']}")
+    if item.get("heat"):
+        meta.append(f"heat={item['heat']}")
+    parts.append(f"   {' | '.join(meta)}")
+    if item.get("summary"):
+        parts.append(f"   summary={item['summary']}")
+    if item.get("content"):
+        parts.append(f"   content={item['content'][:280]}")
+    return parts
+
+
+def write_markdown_file(payload, path):
+    directory = os.path.dirname(path)
+    if directory:
+        os.makedirs(directory, exist_ok=True)
+    with open(path, "w", encoding="utf-8") as handle:
+        handle.write(render_markdown_report(payload))
+
+
+def emit_stdout_summary(payload, exit_code, json_out=None, md_out=None):
+    summary = {
+        "run_at": payload.get("run_at"),
+        "status": payload.get("status"),
+        "exit_code": exit_code,
+        "items": count_items(payload.get("items", [])),
+        "sources_total": payload.get("sources_total", 0),
+        "sources_ok": payload.get("sources_ok", 0),
+        "sources_failed": payload.get("sources_failed", 0),
+    }
+    if "source" in payload:
+        summary["source"] = payload["source"]
+    if "profile" in payload:
+        summary["profile"] = payload["profile"]
+    if json_out:
+        summary["json_out"] = json_out
+    if md_out:
+        summary["md_out"] = md_out
+    print(json.dumps(summary, ensure_ascii=False))
 
 def filter_items(items, keyword=None):
     if not keyword:
@@ -111,6 +462,7 @@ def fetch_hackernews(limit=5, keyword=None):
             return items[:limit]
             
         except Exception as e:
+            record_source_error("Hacker News", e)
             print(f"HN Algolia failed: {e}", file=sys.stderr)
             # Fallback to scraping logic below if API completely errors out (e.g. network/timeout)
             pass
@@ -126,7 +478,9 @@ def fetch_hackernews(limit=5, keyword=None):
         try:
             response = requests.get(url, headers=HEADERS, timeout=10)
             if response.status_code != 200: break
-        except: break
+        except Exception as e:
+            record_source_error("Hacker News", e)
+            break
 
         soup = BeautifulSoup(response.text, 'html.parser')
         rows = soup.select('.athing')
@@ -203,7 +557,8 @@ def fetch_weibo(limit=5, keyword=None):
             })
             
         return filter_items(all_items, keyword)[:limit]
-    except Exception: 
+    except Exception as e:
+        record_source_error("Weibo Hot Search", e)
         return []
 
 def fetch_github(limit=5, keyword=None):
@@ -240,12 +595,16 @@ def fetch_github(limit=5, keyword=None):
                         "time": "Updated recently"
                      })
                 if items: return items[:limit]
-         except: pass
+         except Exception as e:
+             record_source_error("GitHub Trending", e)
+             pass
 
     # Default Trending
     try:
         response = requests.get("https://github.com/trending", headers=HEADERS, timeout=10)
-    except: return []
+    except Exception as e:
+        record_source_error("GitHub Trending", e)
+        return []
     
     soup = BeautifulSoup(response.text, 'html.parser')
     items = []
@@ -293,7 +652,9 @@ def fetch_36kr(limit=5, keyword=None):
                 "heat": ""
             })
         return filter_items(items, keyword)[:limit]
-    except: return []
+    except Exception as e:
+        record_source_error("36Kr", e)
+        return []
 
 def fetch_v2ex(limit=5, keyword=None):
     try:
@@ -314,7 +675,9 @@ def fetch_v2ex(limit=5, keyword=None):
                 "time": "Hot"
             })
         return filter_items(items, keyword)[:limit]
-    except: return []
+    except Exception as e:
+        record_source_error("V2EX", e)
+        return []
 
 def fetch_tencent(limit=5, keyword=None):
     try:
@@ -329,7 +692,9 @@ def fetch_tencent(limit=5, keyword=None):
                 "time": news.get('pub_time', '') or news.get('publish_time', '')
             })
         return filter_items(items, keyword)[:limit]
-    except: return []
+    except Exception as e:
+        record_source_error("Tencent News", e)
+        return []
 
 def fetch_wallstreetcn(limit=5, keyword=None):
     try:
@@ -348,7 +713,9 @@ def fetch_wallstreetcn(limit=5, keyword=None):
                      "time": time_str
                  })
         return filter_items(items, keyword)[:limit]
-    except: return []
+    except Exception as e:
+        record_source_error("Wall Street CN", e)
+        return []
 
 def fetch_producthunt(limit=5, keyword=None):
     try:
@@ -373,7 +740,9 @@ def fetch_producthunt(limit=5, keyword=None):
                 "heat": "Top Product" # RSS implies top rank
             })
         return filter_items(items, keyword)[:limit]
-    except: return []
+    except Exception as e:
+        record_source_error("Product Hunt", e)
+        return []
 
 # --- New Fetchers (RSS/API) ---
 
@@ -413,9 +782,11 @@ def fetch_huggingface_papers(limit=5, keyword=None):
                     "summary": paper.get('summary', '')
                 })
         else:
+             record_source_error("HF Papers", result.stderr or "Playwright subprocess failed", code="env" if "ModuleNotFoundError" in (result.stderr or "") else None)
              print(f"HF Playwright Failed: {result.stderr}", file=sys.stderr)
              
     except Exception as e:
+        record_source_error("HF Papers", e)
         print(f"HF Playwright Exception: {e}", file=sys.stderr)
             
     return filter_items(items[:limit], keyword)
@@ -478,6 +849,7 @@ def fetch_latentspace_ainews(limit=5, keyword=None):
                 "content": content
             })
     except Exception as e:
+        record_source_error("Latent Space AINews", e)
         print(f"Latent Space AINews fetch error: {e}", file=sys.stderr)
     
     return filter_items(items[:limit], keyword)
@@ -504,20 +876,18 @@ def fetch_rss_with_playwright(url, source_name, limit=5):
     try:
         # Special handling for Ben's Bites which uses custom Homepage Scraper
         if "Ben's Bites" in source_name:
-             script_path = os.path.join(os.path.dirname(__file__), "fetch_bensbites.py")
-             # No arguments needed, script hardcodes URL
-             cmd = [sys.executable, script_path]
-             
-             
-             result = subprocess.run(cmd, capture_output=True, text=True, timeout=90)
-             
-             if result.returncode == 0:
-                 try:
+            script_path = os.path.join(os.path.dirname(__file__), "fetch_bensbites.py")
+            cmd = [sys.executable, script_path]
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=90)
+
+            if result.returncode == 0:
+                try:
                     data = json.loads(result.stdout)
-                    if not data: raise ValueError("Empty JSON")
+                    if not data:
+                        raise ValueError("Empty JSON")
                     return data
-                 except Exception:
-                    # Fallback for Ben's Bites if parsing fails
+                except Exception as e:
+                    record_source_error("Ben's Bites", e)
                     return [{
                         "source": "Ben's Bites",
                         "title": "Ben's Bites (Visit Site)",
@@ -525,25 +895,28 @@ def fetch_rss_with_playwright(url, source_name, limit=5):
                         "time": "Today",
                         "summary": "Auto-fetch failed. Please verify on site.",
                     }]
-             else:
-                 return [{
-                        "source": "Ben's Bites",
-                        "title": "Ben's Bites (Check Site)",
-                        "url": "https://bensbites.beehiiv.com/",
-                        "time": "Today",
-                        "summary": "Fetch process failed.",
-                    }]
 
-        # User generic Playwright script for all OTHER protected feeds
-        
+            record_source_error("Ben's Bites", result.stderr or "Fetch process failed")
+            return [{
+                "source": "Ben's Bites",
+                "title": "Ben's Bites (Check Site)",
+                "url": "https://bensbites.beehiiv.com/",
+                "time": "Today",
+                "summary": "Fetch process failed.",
+            }]
+
+        script_path = os.path.join(os.path.dirname(__file__), "fetch_generic_playwright.py")
+        cmd = [sys.executable, script_path, url]
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=90)
         if result.returncode == 0:
             from rss_parser import parse_rss_content
-            # Result stdout should be the HTML/XML content
-            return parse_rss_content(result.stdout, source_name, limit)
-        else:
-            print(f"Playwright fetch failed for {source_name}: {result.stderr}", file=sys.stderr)
-            return []
+            return parse_rss_content(result.stdout, source_name, limit, error_callback=record_source_error)
+
+        record_source_error(source_name, result.stderr or "Playwright fetch failed")
+        print(f"Playwright fetch failed for {source_name}: {result.stderr}", file=sys.stderr)
+        return []
     except Exception as e:
+        record_source_error(source_name, e)
         print(f"Playwright exception for {source_name}: {e}", file=sys.stderr)
         return []
 
@@ -568,7 +941,7 @@ def fetch_ai_newsletters(limit=5, keyword=None):
     """Aggregate Fetcher for AI Newsletters"""
     all_items = []
     with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
-        futures = {executor.submit(fetch_rss_feed, url, name, 3): name for name, url in AI_NEWSLETTER_SOURCES}
+        futures = {executor.submit(fetch_rss_feed, url, name, 3, record_source_error): name for name, url in AI_NEWSLETTER_SOURCES}
         for future in concurrent.futures.as_completed(futures):
             all_items.extend(future.result())
     return filter_items(all_items, keyword)[:limit]
@@ -576,7 +949,7 @@ def fetch_ai_newsletters(limit=5, keyword=None):
 def fetch_podcasts(limit=5, keyword=None):
     all_items = []
     with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
-        futures = {executor.submit(fetch_rss_feed, url, name, 3): name for name, url in PODCAST_SOURCES}
+        futures = {executor.submit(fetch_rss_feed, url, name, 3, record_source_error): name for name, url in PODCAST_SOURCES}
         for future in concurrent.futures.as_completed(futures):
             all_items.extend(future.result())
     return filter_items(all_items, keyword)[:limit]
@@ -584,158 +957,230 @@ def fetch_podcasts(limit=5, keyword=None):
 def fetch_essays(limit=5, keyword=None):
     all_items = []
     with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
-        futures = {executor.submit(fetch_rss_feed, url, name, 3): name for name, url in ESSAY_SOURCES}
+        futures = {executor.submit(fetch_rss_feed, url, name, 3, record_source_error): name for name, url in ESSAY_SOURCES}
         for future in concurrent.futures.as_completed(futures):
             all_items.extend(future.result())
     return filter_items(all_items, keyword)[:limit]
 
 def create_single_rss_fetcher(url, name):
     def fetcher(limit=5, keyword=None):
-        return filter_items(fetch_rss_feed(url, name, limit), keyword)[:limit]
+        return filter_items(fetch_rss_feed(url, name, limit, record_source_error), keyword)[:limit]
     return fetcher
 
 
-def save_report(data, source_name, out_dir):
-    """
-    Saves JSON and generates a simple Markdown report.
-    """
+def save_report(payload, source_name, out_dir):
     if not os.path.exists(out_dir):
         os.makedirs(out_dir)
-        
-    # Sanitize source name for filename
-    safe_name = "".join([c if c.isalnum() else "_" for c in source_name]).lower()
+    safe_name = sanitize_filename(source_name)
     timestamp = datetime.now().strftime("%H%M")
-    
-    # 1. Save JSON
     json_path = os.path.join(out_dir, f"{safe_name}_{timestamp}.json")
-    with open(json_path, 'w', encoding='utf-8') as f:
-        json.dump(data, f, indent=2, ensure_ascii=False)
-        
+    write_json_file(payload, json_path)
     return json_path
+
+
+def default_reports_dir():
+    today = datetime.now().strftime("%Y-%m-%d")
+    return os.path.join(os.path.dirname(os.path.dirname(__file__)), "reports", today)
+
+
+def build_sources_map():
+    sources_map = {
+        "hackernews": fetch_hackernews,
+        "weibo": fetch_weibo,
+        "github": fetch_github,
+        "36kr": fetch_36kr,
+        "v2ex": fetch_v2ex,
+        "tencent": fetch_tencent,
+        "wallstreetcn": fetch_wallstreetcn,
+        "producthunt": fetch_producthunt,
+        "huggingface": fetch_huggingface_papers,
+        "ai_newsletters": fetch_ai_newsletters,
+        "podcasts": fetch_podcasts,
+        "essays": fetch_essays,
+        "latentspace_ainews": fetch_latentspace_ainews,
+    }
+
+    for name, url in AI_NEWSLETTER_SOURCES:
+        key = name.lower().replace(" ", "").replace("'", "")
+        if "Ben's Bites" in name or "The Rundown" in name:
+            sources_map[key] = lambda limit=10, k=None, u=url, n=name: filter_items(fetch_rss_with_playwright(u, n, limit), k)[:limit]
+        else:
+            sources_map[key] = create_single_rss_fetcher(url, name)
+
+    for name, url in PODCAST_SOURCES:
+        key = name.lower().replace(" ", "")
+        sources_map[key] = create_single_rss_fetcher(url, name)
+
+    for name, url in ESSAY_SOURCES:
+        key = name.lower().replace(" ", "")
+        sources_map[key] = create_single_rss_fetcher(url, name)
+    return sources_map
+
+
+def print_sources_list(sources_map):
+    print(f"{'Source Key':<20} | Source Name")
+    print("-" * 60)
+    for key in sorted(sources_map.keys()):
+        func = sources_map[key]
+        print(f"{key:<20} | {source_display_name(func, key)}")
+
+
+def write_payload_outputs(payload, json_out=None, md_out=None):
+    if json_out:
+        write_json_file(payload, json_out)
+    if md_out:
+        write_markdown_file(payload, md_out)
+
+
+def build_run_payload(source_name, run_at, items, failed_sources, sources_total, requested_key_count=None):
+    failed_sources = dedupe_failed_sources(failed_sources)
+    failed_requested = set()
+    for item in failed_sources:
+        key = item.get("source_key") or item.get("source")
+        if key:
+            failed_requested.add(key)
+    sources_failed = min(len(failed_requested), sources_total) if sources_total else 0
+    if requested_key_count is not None and not sources_failed and failed_sources:
+        sources_failed = min(len(failed_sources), requested_key_count)
+    sources_ok = max(sources_total - sources_failed, 0)
+    status, exit_code = determine_status_and_exit_code(count_items(items), failed_sources)
+    payload = {
+        "run_at": to_iso(run_at),
+        "source": source_name,
+        "status": status,
+        "sources_total": sources_total,
+        "sources_ok": sources_ok,
+        "sources_failed": sources_failed,
+        "failed_sources": failed_sources,
+        "items": items,
+    }
+    return payload, exit_code
+
 
 def main():
     parser = argparse.ArgumentParser()
-    sources_map = {
-        'hackernews': fetch_hackernews, 'weibo': fetch_weibo, 'github': fetch_github,
-        '36kr': fetch_36kr, 'v2ex': fetch_v2ex, 'tencent': fetch_tencent,
-        'wallstreetcn': fetch_wallstreetcn, 'producthunt': fetch_producthunt,
-        # Aggregates
-        'huggingface': fetch_huggingface_papers,
-        'ai_newsletters': fetch_ai_newsletters, 'podcasts': fetch_podcasts,
-        'essays': fetch_essays,
-        # Standalone AI Sources
-        'latentspace_ainews': fetch_latentspace_ainews,
-    }
+    parser.add_argument("--source", default="all", help='Source(s) to fetch from (comma-separated). Now supports sub-sources like "chinai", "paulgraham"')
+    parser.add_argument("--limit", type=int, default=10, help="Limit per source. Default 10")
+    parser.add_argument("--keyword", help="Comma-sep keyword filter")
+    parser.add_argument("--deep", action="store_true", help="Download article content for detailed summarization")
+    parser.add_argument("--deep-top-n", type=int, help="Only deep-enrich the first N items")
+    parser.add_argument("--max-age-minutes", type=int, help="Drop items older than this many minutes when age can be determined")
+    parser.add_argument("--save", action="store_true", help="Save output to reports directory (JSON)")
+    parser.add_argument("--no-save", action="store_true", dest="no_save", help="Skip saving JSON files to disk (only output to stdout)")
+    parser.add_argument("--outdir", help="Custom output directory for saved reports")
+    parser.add_argument("--json-out", help="Write run JSON to this path")
+    parser.add_argument("--md-out", help="Write Markdown summary to this path")
+    parser.add_argument("--stdout-summary", action="store_true", help="Print a one-line machine-readable JSON summary to stdout")
+    parser.add_argument("--list-sources", action="store_true", help="List all available source keys")
 
-    # Dynamic Registration of Sub-sources
-    # AI Newsletters
-    for name, url in AI_NEWSLETTER_SOURCES:
-        key = name.lower().replace(' ', '').replace("'", "")
-        # Check if this source needs Playwright
-        if "Ben's Bites" in name or "The Rundown" in name:
-             sources_map[key] = lambda limit=10, k=None, u=url, n=name: filter_items(fetch_rss_with_playwright(u, n, limit), k)[:limit]
-        else:
-             sources_map[key] = create_single_rss_fetcher(url, name)
-        
-    # Podcasts
-    for name, url in PODCAST_SOURCES:
-        key = name.lower().replace(' ', '')
-        sources_map[key] = create_single_rss_fetcher(url, name)
-
-    # Essays
-    for name, url in ESSAY_SOURCES:
-        key = name.lower().replace(' ', '')
-        sources_map[key] = create_single_rss_fetcher(url, name)
-    
-    parser.add_argument('--source', default='all', help='Source(s) to fetch from (comma-separated). Now supports sub-sources like "chinai", "paulgraham"')
-    parser.add_argument('--limit', type=int, default=10, help='Limit per source. Default 10')
-    parser.add_argument('--keyword', help='Comma-sep keyword filter')
-    parser.add_argument('--deep', action='store_true', help='Download article content for detailed summarization')
-    parser.add_argument('--save', action='store_true', help='Save output to reports directory (JSON + MD)')
-    parser.add_argument('--no-save', action='store_true', dest='no_save', help='Skip saving JSON files to disk (only output to stdout)')
-    parser.add_argument('--outdir', help='Custom output directory for saved reports')
-    parser.add_argument('--list-sources', action='store_true', help='List all available source keys')
-    
     args = parser.parse_args()
+    sources_map = build_sources_map()
 
     if args.list_sources:
-        print(f"{'Source Key':<20} | {'Source Name'}")
-        print("-" * 40)
-        for key in sorted(sources_map.keys()):
-            print(f"{key:<20}")
-        return
-    
-    to_run = []
-    if args.source == 'all':
-        to_run = list(sources_map.values())
-    else:
-        requested_sources = [s.strip() for s in args.source.split(',')]
-        for s in requested_sources:
-            if s in sources_map: to_run.append(sources_map[s])
-            
-    results = []
-    
-    def run_fetchers(fetchers, limit, kw):
-        res = []
-        for func in fetchers:
-            try:
-                res.extend(func(limit, kw))
-            except: pass
-        return res
+        print_sources_list(sources_map)
+        return EXIT_SUCCESS
 
-    # Primary Fetch
-    results = run_fetchers(to_run, args.limit, args.keyword)
-        
-    # Smart Fill Logic (Only if keyword is used and results are sparse)
-    MIN_ITEMS = 5
-    if args.keyword and len(results) < MIN_ITEMS:
+    run_at = now_utc()
+    clear_source_errors()
+
+    if MISSING_DEPENDENCY_ERROR is not None:
+        failed_sources = [{
+            "source": "runtime",
+            "source_key": "runtime",
+            "error": f"Missing dependency: {MISSING_DEPENDENCY_ERROR.name}",
+            "code": "env",
+        }]
+        payload, exit_code = build_run_payload(args.source, run_at, [], failed_sources, sources_total=1, requested_key_count=1)
+        write_payload_outputs(payload, args.json_out, args.md_out)
+        if args.stdout_summary:
+            emit_stdout_summary(payload, exit_code, args.json_out, args.md_out)
+        else:
+            print(json.dumps(payload, indent=2, ensure_ascii=False))
+        return exit_code
+
+    requested_specs = []
+    requested_keys = []
+    if args.source == "all":
+        requested_specs = [{"key": key, "func": func, "name": source_display_name(func, key)} for key, func in sources_map.items()]
+        requested_keys = [spec["key"] for spec in requested_specs]
+    else:
+        for raw_key in [item.strip() for item in args.source.split(",") if item.strip()]:
+            requested_keys.append(raw_key)
+            if raw_key in sources_map:
+                func = sources_map[raw_key]
+                requested_specs.append({"key": raw_key, "func": func, "name": source_display_name(func, raw_key)})
+            else:
+                record_source_error(raw_key, ValueError(f"Unknown source key: {raw_key}"), code="error", context={"source_key": raw_key})
+
+    def run_fetchers(specs, limit, keyword):
+        aggregated = []
+        for spec in specs:
+            try:
+                aggregated.extend(spec["func"](limit, keyword))
+            except Exception as exc:
+                record_source_error(spec["name"], exc, context={"source_key": spec["key"]})
+        return aggregated
+
+    results = run_fetchers(requested_specs, args.limit, args.keyword)
+
+    min_items = 5
+    if args.keyword and len(results) < min_items and requested_specs:
         sys.stderr.write(f"Smart Fill triggered: Found {len(results)} items, filling gaps...\n")
-        
-        # Secondary Fetch (Broad, no keyword)
-        # We fetch enough to potentially fill the gap, limit=MIN_ITEMS is a safe bet for each source
-        fill_limit = MIN_ITEMS 
-        fill_results = run_fetchers(to_run, limit=fill_limit, kw=None)
-        
-        # Deduplicate and Append
-        existing_urls = {item.get('url') for item in results}
-        existing_titles = {item.get('title') for item in results}
-        
+        fill_results = run_fetchers(requested_specs, limit=min_items, keyword=None)
+        existing_urls = {item.get("url") for item in results}
+        existing_titles = {item.get("title") for item in results}
         for item in fill_results:
-            if len(results) >= MIN_ITEMS:
+            if len(results) >= min_items:
                 break
-                
-            u = item.get('url')
-            t = item.get('title')
-            
-            if u not in existing_urls and t not in existing_titles:
-                # Mark as smart fill
-                item['smart_fill'] = True
-                
-                # Add warning to time field as per SKILL.md
-                if 'time' in item:
-                    item['time'] = f"⚠️ {item['time']}"
-                
+            url = item.get("url")
+            title = item.get("title")
+            if url not in existing_urls and title not in existing_titles:
+                item["smart_fill"] = True
+                if item.get("time"):
+                    item["time"] = f"⚠️ {item['time']}"
                 results.append(item)
-                existing_urls.add(u)
-                existing_titles.add(t)
+                existing_urls.add(url)
+                existing_titles.add(title)
+
+    results = annotate_items(results, run_at)
+    results = filter_items_by_age(results, args.max_age_minutes)
 
     if args.deep and results:
-        sys.stderr.write(f"Deep fetching content for {len(results)} items...\n")
-        results = enrich_items_with_content(results)
-        
-    print(json.dumps(results, indent=2, ensure_ascii=False))
-    
-    # Save Report if requested or if running a single source (implicit convenience)
-    # Skip saving when --no-save is set (agent reads from stdout)
-    if not getattr(args, 'no_save', False) and (args.save or args.source != 'all'):
-        if args.outdir:
-            out_dir = args.outdir
-        else:
-            today = datetime.now().strftime('%Y-%m-%d')
-            out_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'reports', today)
-            
-        md_file = save_report(results, args.source, out_dir)
-        sys.stderr.write(f"\n[Saved] Raw Data: {md_file} (Agent to process)\n")
+        deep_limit = len(results) if args.deep_top_n is None else min(len(results), max(args.deep_top_n, 0))
+        sys.stderr.write(f"Deep fetching content for {deep_limit} item(s)...\n")
+        apply_deep_enrichment(results, args.deep_top_n)
+
+    failed_sources = get_recorded_source_errors()
+    payload, exit_code = build_run_payload(
+        args.source,
+        run_at,
+        results,
+        failed_sources,
+        sources_total=len(requested_keys) if requested_keys else len(requested_specs),
+        requested_key_count=len(requested_keys),
+    )
+
+    json_out = args.json_out
+    md_out = args.md_out
+    if not args.no_save and (args.save or args.source != "all"):
+        out_dir = args.outdir or default_reports_dir()
+        os.makedirs(out_dir, exist_ok=True)
+        if not json_out:
+            timestamp = datetime.now().strftime("%H%M")
+            json_out = os.path.join(out_dir, f"{sanitize_filename(args.source)}_{timestamp}.json")
+
+    write_payload_outputs(payload, json_out, md_out)
+
+    if args.stdout_summary:
+        emit_stdout_summary(payload, exit_code, json_out, md_out)
+    else:
+        print(json.dumps(payload, indent=2, ensure_ascii=False))
+
+    if json_out:
+        sys.stderr.write(f"[Saved] JSON: {json_out}\n")
+    if md_out:
+        sys.stderr.write(f"[Saved] Markdown: {md_out}\n")
+    return exit_code
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

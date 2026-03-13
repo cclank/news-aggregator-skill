@@ -9,6 +9,7 @@ import threading
 from datetime import datetime, timedelta, timezone
 from email.utils import parsedate_to_datetime
 import subprocess
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 MISSING_DEPENDENCY_ERROR = None
 try:
@@ -41,6 +42,7 @@ SOURCE_ERRORS_LOCK = threading.Lock()
 
 SOURCE_DISPLAY_NAMES = {
     "fetch_hackernews": "Hacker News",
+    "fetch_hackernews_api": "Hacker News API",
     "fetch_weibo": "Weibo Hot Search",
     "fetch_github": "GitHub Trending",
     "fetch_36kr": "36Kr",
@@ -54,6 +56,8 @@ SOURCE_DISPLAY_NAMES = {
     "fetch_essays": "Essays",
     "fetch_latentspace_ainews": "Latent Space AINews",
 }
+
+HN_API_BASE_URL = "https://hacker-news.firebaseio.com/v0"
 
 
 def now_utc():
@@ -134,6 +138,137 @@ def sanitize_filename(value):
     return "".join([c if c.isalnum() else "_" for c in value]).strip("_").lower() or "output"
 
 
+def default_health_path():
+    return os.path.join(os.path.dirname(os.path.dirname(__file__)), "reports", "source_health.json")
+
+
+def load_json_file(path, default):
+    if not path or not os.path.exists(path):
+        return default
+    try:
+        with open(path, "r", encoding="utf-8") as handle:
+            return json.load(handle)
+    except Exception:
+        return default
+
+
+def stable_source_id(value):
+    return sanitize_filename(str(value or "source"))
+
+
+def normalize_url(url):
+    if not url or not isinstance(url, str):
+        return None
+    raw = url.strip()
+    if not raw or not raw.startswith(("http://", "https://")):
+        return raw or None
+
+    try:
+        parsed = urlsplit(raw)
+    except Exception:
+        return raw
+
+    scheme = parsed.scheme.lower() or "https"
+    netloc = parsed.netloc.lower()
+    if netloc.startswith("www."):
+        netloc = netloc[4:]
+    if scheme == "https" and netloc.endswith(":443"):
+        netloc = netloc[:-4]
+    if scheme == "http" and netloc.endswith(":80"):
+        netloc = netloc[:-3]
+
+    path = parsed.path or "/"
+    if path != "/":
+        path = path.rstrip("/")
+        if not path:
+            path = "/"
+
+    query_pairs = []
+    for key, value in parse_qsl(parsed.query, keep_blank_values=False):
+        lowered = key.lower()
+        if lowered.startswith("utm_") or lowered in {"fbclid", "gclid", "igshid", "mc_cid", "mc_eid", "ref", "referer", "spm"}:
+            continue
+        query_pairs.append((key, value))
+    query = urlencode(query_pairs, doseq=True)
+
+    normalized = urlunsplit((scheme, netloc, path, query, ""))
+    return normalized.rstrip("/") if normalized.endswith("/") and path == "/" else normalized
+
+
+def normalize_title(value):
+    if not value:
+        return None
+    lowered = value.lower()
+    lowered = re.sub(r"\s+", " ", lowered)
+    lowered = re.sub(r"[^\w\s]", "", lowered)
+    return lowered.strip() or None
+
+
+def canonicalize_item(item):
+    normalized = dict(item)
+    normalized["canonical_url"] = normalize_url(normalized.get("url"))
+    return normalized
+
+
+def dedupe_items(items):
+    deduped = []
+    seen = set()
+    for item in items:
+        normalized = canonicalize_item(item)
+        dedupe_key = normalized.get("canonical_url") or normalize_title(normalized.get("title"))
+        if not dedupe_key:
+            deduped.append(normalized)
+            continue
+        if dedupe_key in seen:
+            continue
+        seen.add(dedupe_key)
+        deduped.append(normalized)
+    return deduped
+
+
+def compact_text(value, limit):
+    if not value:
+        return None
+    text = " ".join(str(value).split())
+    if len(text) <= limit:
+        return text
+    return text[: max(limit - 1, 0)].rstrip() + "…"
+
+
+def render_telegram_report(payload):
+    lines = []
+    label = payload.get("profile") or payload.get("source") or "run"
+    lines.append(f"*{label}*")
+    lines.append(
+        f"状态: {payload.get('status', '')} | 信源 {payload.get('sources_ok', 0)}/{payload.get('sources_total', 0)}"
+    )
+
+    failed_sources = payload.get("failed_sources") or []
+    if failed_sources:
+        failed_names = []
+        for item in failed_sources[:5]:
+            failed_names.append(item.get("source") or item.get("source_key") or "unknown")
+        lines.append(f"失败: {', '.join(failed_names)}")
+
+    items = payload.get("items", [])
+    if isinstance(items, dict):
+        for section, section_items in items.items():
+            if not section_items:
+                continue
+            lines.append("")
+            lines.append(f"*{section}*")
+            for index, item in enumerate(section_items[:8], start=1):
+                lines.extend(render_markdown_item(index, item, output_format="telegram"))
+    else:
+        for index, item in enumerate(items[:12], start=1):
+            lines.extend(render_markdown_item(index, item, output_format="telegram"))
+
+    if len(lines) == 2 and not failed_sources:
+        lines.append("")
+        lines.append("无结果")
+    return "\n".join(lines).rstrip() + "\n"
+
+
 def parse_relative_time(raw):
     match = re.match(r"(?i)^\s*(\d+)\s+(minute|minutes|hour|hours|day|days)\s+ago\s*$", raw)
     if not match:
@@ -201,7 +336,7 @@ def parse_published_datetime(value):
 
 
 def annotate_item(item, fetched_at):
-    normalized = dict(item)
+    normalized = canonicalize_item(item)
     published_raw = normalized.get("published_at_raw", normalized.get("time"))
     published_dt = parse_published_datetime(published_raw)
     normalized["published_at_raw"] = published_raw if published_raw not in ("", None) else None
@@ -274,7 +409,10 @@ def write_json_file(payload, path):
         json.dump(payload, handle, indent=2, ensure_ascii=False)
 
 
-def render_markdown_report(payload):
+def render_markdown_report(payload, output_format="full"):
+    if output_format == "telegram":
+        return render_telegram_report(payload)
+
     lines = [
         "# News Aggregator Run",
         "",
@@ -308,18 +446,33 @@ def render_markdown_report(payload):
                 lines.append("")
                 continue
             for index, item in enumerate(section_items, start=1):
-                lines.extend(render_markdown_item(index, item))
+                lines.extend(render_markdown_item(index, item, output_format=output_format))
                 lines.append("")
     else:
         if not items:
             lines.append("- No items")
         for index, item in enumerate(items, start=1):
-            lines.extend(render_markdown_item(index, item))
+            lines.extend(render_markdown_item(index, item, output_format=output_format))
             lines.append("")
     return "\n".join(lines).rstrip() + "\n"
 
 
-def render_markdown_item(index, item):
+def render_markdown_item(index, item, output_format="full"):
+    if output_format == "telegram":
+        title = compact_text(item.get("title") or "(untitled)", 110)
+        meta = [item.get("source", "Unknown")]
+        if item.get("time"):
+            meta.append(str(item["time"]))
+        if item.get("heat"):
+            meta.append(str(item["heat"]))
+        lines = [f"{index}. {title}", f"   {' | '.join(meta)}"]
+        summary = compact_text(item.get("summary") or item.get("content"), 180)
+        if summary:
+            lines.append(f"   {summary}")
+        if item.get("url"):
+            lines.append(f"   {item['url']}")
+        return lines
+
     title = item.get("title") or "(untitled)"
     url = item.get("url") or ""
     header = f"{index}. **{title}**"
@@ -339,18 +492,20 @@ def render_markdown_item(index, item):
         parts.append(f"   summary={item['summary']}")
     if item.get("content"):
         parts.append(f"   content={item['content'][:280]}")
+    if item.get("canonical_url") and item.get("canonical_url") != item.get("url"):
+        parts.append(f"   canonical_url={item['canonical_url']}")
     return parts
 
 
-def write_markdown_file(payload, path):
+def write_markdown_file(payload, path, output_format="full"):
     directory = os.path.dirname(path)
     if directory:
         os.makedirs(directory, exist_ok=True)
     with open(path, "w", encoding="utf-8") as handle:
-        handle.write(render_markdown_report(payload))
+        handle.write(render_markdown_report(payload, output_format=output_format))
 
 
-def emit_stdout_summary(payload, exit_code, json_out=None, md_out=None):
+def emit_stdout_summary(payload, exit_code, json_out=None, md_out=None, output_format="full", health_out=None):
     summary = {
         "run_at": payload.get("run_at"),
         "status": payload.get("status"),
@@ -368,7 +523,71 @@ def emit_stdout_summary(payload, exit_code, json_out=None, md_out=None):
         summary["json_out"] = json_out
     if md_out:
         summary["md_out"] = md_out
+    if output_format != "full":
+        summary["format"] = output_format
+    if health_out:
+        summary["health_out"] = health_out
     print(json.dumps(summary, ensure_ascii=False))
+
+
+def update_health_state(health_path, run_at, requested_sources, failed_sources):
+    if not health_path:
+        return
+
+    state = load_json_file(health_path, {"updated_at": None, "sources": {}})
+    sources_state = state.setdefault("sources", {})
+    failures_by_id = {}
+    unique_requested = {}
+
+    for item in failed_sources or []:
+        candidates = []
+        if item.get("source_key"):
+            candidates.append(stable_source_id(item["source_key"]))
+        if item.get("source"):
+            candidates.append(stable_source_id(item["source"]))
+        for candidate in candidates:
+            failures_by_id.setdefault(candidate, []).append(item)
+
+    for requested in requested_sources:
+        source_key = requested.get("source_key") or requested.get("key") or requested.get("source")
+        source_name = requested.get("source") or requested.get("name") or source_key
+        unique_requested[stable_source_id(source_key or source_name)] = {
+            "source_key": source_key,
+            "source": source_name,
+        }
+
+    for requested in unique_requested.values():
+        source_key = requested.get("source_key") or requested.get("key") or requested.get("source")
+        source_name = requested.get("source") or requested.get("name") or source_key
+        source_id = stable_source_id(source_key or source_name)
+        entry = sources_state.setdefault(
+            source_id,
+            {
+                "source": source_name,
+                "source_key": source_key,
+                "last_ok_at": None,
+                "last_error_at": None,
+                "last_error": None,
+                "consecutive_errors": 0,
+            },
+        )
+        entry["source"] = source_name
+        entry["source_key"] = source_key
+        matched_failures = failures_by_id.get(source_id, [])
+        if not matched_failures and source_name:
+            matched_failures = failures_by_id.get(stable_source_id(source_name), [])
+        if matched_failures:
+            last_failure = matched_failures[-1]
+            entry["last_error_at"] = to_iso(run_at)
+            entry["last_error"] = last_failure.get("error")
+            entry["consecutive_errors"] = int(entry.get("consecutive_errors", 0)) + 1
+        else:
+            entry["last_ok_at"] = to_iso(run_at)
+            entry["last_error"] = None
+            entry["consecutive_errors"] = 0
+
+    state["updated_at"] = to_iso(run_at)
+    write_json_file(state, health_path)
 
 def filter_items(items, keyword=None):
     if not keyword:
@@ -521,6 +740,112 @@ def fetch_hackernews(limit=5, keyword=None):
         time.sleep(0.5)
 
     return news_items[:limit]
+
+
+def _humanize_age_from_unix(unix_ts, reference_ts=None):
+    try:
+        created = int(unix_ts)
+    except (TypeError, ValueError):
+        return "Unknown"
+
+    now_ts = int(reference_ts if reference_ts is not None else time.time())
+    delta = max(now_ts - created, 0)
+    if delta < 60:
+        return "Just now"
+    if delta < 3600:
+        minutes = max(delta // 60, 1)
+        return f"{minutes}m ago"
+    if delta < 86400:
+        hours = max(delta // 3600, 1)
+        return f"{hours}h ago"
+    days = max(delta // 86400, 1)
+    return f"{days}d ago"
+
+
+def _clean_hn_text(value):
+    if not value:
+        return None
+    text = BeautifulSoup(str(value), 'html.parser').get_text(' ', strip=True)
+    text = ' '.join(text.split())
+    return text or None
+
+
+def fetch_hackernews_api(limit=5, keyword=None):
+    display_name = "Hacker News API"
+    endpoint = lambda name: f"{HN_API_BASE_URL}/{name}.json"
+
+    try:
+        session = requests.Session()
+        session.headers.update(HEADERS)
+
+        fetch_depth = min(max(limit * (8 if keyword else 4), 30), 120)
+        endpoints = ["topstories", "beststories", "newstories"]
+        if keyword and re.search(r"(?i)(show hn|ask hn|launch|startup|yc|founder)", keyword):
+            endpoints.extend(["showstories", "askstories"])
+
+        candidate_ids = []
+        seen_ids = set()
+        for list_name in endpoints:
+            ids_response = session.get(endpoint(list_name), timeout=10)
+            ids_response.raise_for_status()
+            ids = ids_response.json() or []
+            for item_id in ids[:fetch_depth]:
+                if item_id in seen_ids:
+                    continue
+                seen_ids.add(item_id)
+                candidate_ids.append(item_id)
+
+        if not candidate_ids:
+            return []
+
+        def fetch_item(item_id):
+            response = requests.get(endpoint(f"item/{item_id}"), headers=HEADERS, timeout=10)
+            response.raise_for_status()
+            return response.json()
+
+        items = []
+        with concurrent.futures.ThreadPoolExecutor(max_workers=16) as executor:
+            futures = [executor.submit(fetch_item, item_id) for item_id in candidate_ids]
+            for future in concurrent.futures.as_completed(futures):
+                try:
+                    item = future.result()
+                except Exception:
+                    continue
+                if not item or item.get("deleted") or item.get("dead"):
+                    continue
+                if item.get("type") != "story":
+                    continue
+
+                title = _clean_hn_text(item.get("title"))
+                if not title:
+                    continue
+
+                hn_url = f"https://news.ycombinator.com/item?id={item['id']}"
+                summary = compact_text(_clean_hn_text(item.get("text")), 240)
+                score = item.get("score", 0)
+                descendants = item.get("descendants")
+                heat = f"{score} points"
+                if descendants is not None:
+                    heat += f" • {descendants} comments"
+
+                items.append({
+                    "source": display_name,
+                    "title": title,
+                    "url": item.get("url") or hn_url,
+                    "hn_url": hn_url,
+                    "heat": heat,
+                    "time": _humanize_age_from_unix(item.get("time")),
+                    "published_at_raw": item.get("time"),
+                    "summary": summary,
+                })
+
+        items.sort(key=lambda entry: entry.get("published_at_raw") or 0, reverse=True)
+        items = filter_items(items, keyword)
+        return items[:limit]
+    except Exception as e:
+        record_source_error(display_name, e, context={"source_key": "fetch_hackernews_api"})
+        return []
+
 
 def fetch_weibo(limit=5, keyword=None):
     # Use the PC Ajax API which returns JSON directly and is less rate-limited than scraping s.weibo.com
@@ -986,6 +1311,7 @@ def default_reports_dir():
 def build_sources_map():
     sources_map = {
         "hackernews": fetch_hackernews,
+        "hackernews_api": fetch_hackernews_api,
         "weibo": fetch_weibo,
         "github": fetch_github,
         "36kr": fetch_36kr,
@@ -1025,11 +1351,11 @@ def print_sources_list(sources_map):
         print(f"{key:<20} | {source_display_name(func, key)}")
 
 
-def write_payload_outputs(payload, json_out=None, md_out=None):
+def write_payload_outputs(payload, json_out=None, md_out=None, output_format="full"):
     if json_out:
         write_json_file(payload, json_out)
     if md_out:
-        write_markdown_file(payload, md_out)
+        write_markdown_file(payload, md_out, output_format=output_format)
 
 
 def build_run_payload(source_name, run_at, items, failed_sources, sources_total, requested_key_count=None):
@@ -1071,6 +1397,8 @@ def main():
     parser.add_argument("--json-out", help="Write run JSON to this path")
     parser.add_argument("--md-out", help="Write Markdown summary to this path")
     parser.add_argument("--stdout-summary", action="store_true", help="Print a one-line machine-readable JSON summary to stdout")
+    parser.add_argument("--format", choices=["full", "telegram"], default="full", help="Markdown output format")
+    parser.add_argument("--health-out", default=default_health_path(), help="Write per-source health state JSON to this path")
     parser.add_argument("--list-sources", action="store_true", help="List all available source keys")
 
     args = parser.parse_args()
@@ -1091,9 +1419,15 @@ def main():
             "code": "env",
         }]
         payload, exit_code = build_run_payload(args.source, run_at, [], failed_sources, sources_total=1, requested_key_count=1)
-        write_payload_outputs(payload, args.json_out, args.md_out)
+        write_payload_outputs(payload, args.json_out, args.md_out, output_format=args.format)
+        update_health_state(
+            args.health_out,
+            run_at,
+            [{"source_key": "runtime", "source": "runtime"}],
+            failed_sources,
+        )
         if args.stdout_summary:
-            emit_stdout_summary(payload, exit_code, args.json_out, args.md_out)
+            emit_stdout_summary(payload, exit_code, args.json_out, args.md_out, output_format=args.format, health_out=args.health_out)
         else:
             print(json.dumps(payload, indent=2, ensure_ascii=False))
         return exit_code
@@ -1127,13 +1461,13 @@ def main():
     if args.keyword and len(results) < min_items and requested_specs:
         sys.stderr.write(f"Smart Fill triggered: Found {len(results)} items, filling gaps...\n")
         fill_results = run_fetchers(requested_specs, limit=min_items, keyword=None)
-        existing_urls = {item.get("url") for item in results}
-        existing_titles = {item.get("title") for item in results}
+        existing_urls = {normalize_url(item.get("url")) for item in results}
+        existing_titles = {normalize_title(item.get("title")) for item in results}
         for item in fill_results:
             if len(results) >= min_items:
                 break
-            url = item.get("url")
-            title = item.get("title")
+            url = normalize_url(item.get("url"))
+            title = normalize_title(item.get("title"))
             if url not in existing_urls and title not in existing_titles:
                 item["smart_fill"] = True
                 if item.get("time"):
@@ -1142,6 +1476,7 @@ def main():
                 existing_urls.add(url)
                 existing_titles.add(title)
 
+    results = dedupe_items(results)
     results = annotate_items(results, run_at)
     results = filter_items_by_age(results, args.max_age_minutes)
 
@@ -1169,10 +1504,16 @@ def main():
             timestamp = datetime.now().strftime("%H%M")
             json_out = os.path.join(out_dir, f"{sanitize_filename(args.source)}_{timestamp}.json")
 
-    write_payload_outputs(payload, json_out, md_out)
+    write_payload_outputs(payload, json_out, md_out, output_format=args.format)
+    update_health_state(
+        args.health_out,
+        run_at,
+        [{"source_key": spec["key"], "source": spec["name"]} for spec in requested_specs] or [{"source_key": key, "source": key} for key in requested_keys],
+        failed_sources,
+    )
 
     if args.stdout_summary:
-        emit_stdout_summary(payload, exit_code, json_out, md_out)
+        emit_stdout_summary(payload, exit_code, json_out, md_out, output_format=args.format, health_out=args.health_out)
     else:
         print(json.dumps(payload, indent=2, ensure_ascii=False))
 
@@ -1180,6 +1521,8 @@ def main():
         sys.stderr.write(f"[Saved] JSON: {json_out}\n")
     if md_out:
         sys.stderr.write(f"[Saved] Markdown: {md_out}\n")
+    if args.health_out:
+        sys.stderr.write(f"[Saved] Health: {args.health_out}\n")
     return exit_code
 
 if __name__ == "__main__":

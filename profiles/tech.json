@@ -1,0 +1,28 @@
+{
+  "name": "tech",
+  "sections": {
+    "ai_frontier": {
+      "enrich": true,
+      "sources": [
+        { "source": "hackernews", "limit": 25, "keyword": "AI,LLM,Transformer,Diffusion,Model,RAG" },
+        { "source": "hackernews_api", "limit": 15, "keyword": "AI,LLM,Transformer,Diffusion,Model,RAG" },
+        { "source": "github", "limit": 10, "keyword": "AI,LLM,GPT" }
+      ]
+    },
+    "dev_tools": {
+      "enrich": true,
+      "sources": [
+        { "source": "producthunt", "limit": 20, "keyword": "Developer Tools,Coding,API" },
+        { "source": "github", "limit": 15 }
+      ]
+    },
+    "startups": {
+      "enrich": true,
+      "sources": [
+        { "source": "36kr", "limit": 20, "keyword": "融资,首发,独角兽,创投" },
+        { "source": "producthunt", "limit": 10 },
+        { "source": "hackernews_api", "limit": 8, "keyword": "Show HN,Ask HN,Launch,Startup,YC" }
+      ]
+    }
+  }
+}

@@ -57,12 +57,18 @@ It prints a single-line JSON summary to stdout, suitable for an OpenClaw task to
 - `reports/openclaw-full/<profile>_full.json`
 - `reports/openclaw-full/<profile>_full.md`
 
+The wrapper also records restart-safe task state in `~/.openclaw/state/`:
+- creates a task record before the run starts
+- writes the generated markdown artifact on success
+- creates a delivery record with a stable dedupe key for the Discord handoff
+
 Recommended OpenClaw pattern:
 1. Run `run_full_briefing_for_openclaw.sh`
 2. Parse stdout JSON summary
 3. If success/partial, read the generated Markdown file
 4. Use the OpenClaw `message` tool to send Telegram
 5. If failure, send only the compact error
+6. After the send succeeds, mark the delivery as delivered with the same dedupe key
 
 ## Notes
 

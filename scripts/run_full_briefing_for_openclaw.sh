@@ -22,6 +22,10 @@ OUT_DIR="$REPO_DIR/reports/openclaw-full"
 mkdir -p "$OUT_DIR"
 JSON_OUT="$OUT_DIR/${PROFILE}_full.json"
 MD_OUT="$OUT_DIR/${PROFILE}_full.md"
+RECEIPT_OUT="$OUT_DIR/${PROFILE}_delivery_receipt.json"
+
+# Refresh the replay queue before starting a fresh generation.
+python3 "$TASK_STATE_PY" recover --json >/dev/null || true
 
 RUNNER="$SCRIPT_DIR/run_full_briefing_local.sh"
 if [[ ! -x "$RUNNER" ]]; then
@@ -77,6 +81,28 @@ PY
 fi
 
 if [[ $STATUS -eq 0 && -f "$MD_OUT" ]]; then
+  python3 - <<'PY' "$TASK_ID" "$PROFILE" "$RUN_KEY" "$JSON_OUT" "$MD_OUT" "$RECEIPT_OUT" "$DEDUPE_KEY"
+import json
+import sys
+from pathlib import Path
+
+task_id, profile, run_key, json_out, md_out, receipt_out, dedupe_key = sys.argv[1:8]
+payload = {
+    "task_id": task_id,
+    "task_type": "full_briefing",
+    "profile": profile,
+    "run_key": run_key,
+    "status": "pending",
+    "delivery_mode": "direct_message_tool",
+    "dedupe_key": dedupe_key,
+    "json_out": json_out,
+    "md_out": md_out,
+    "artifact_path": md_out,
+}
+path = Path(receipt_out)
+path.parent.mkdir(parents=True, exist_ok=True)
+path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+PY
   python3 "$TASK_STATE_PY" generated \
     --task-id "$TASK_ID" \
     --artifact-path "$MD_OUT" \
@@ -86,6 +112,16 @@ if [[ $STATUS -eq 0 && -f "$MD_OUT" ]]; then
     --delivery-status pending \
     --delivery-dedupe-key "$DEDUPE_KEY" \
     --note "full briefing generated for delivery" >/dev/null
+  python3 "$TASK_STATE_PY" deliver \
+    --task-id "$TASK_ID" \
+    --status pending \
+    --dedupe-key "$DEDUPE_KEY" \
+    --provider discord \
+    --target "$CHANNEL_ID" \
+    --mode direct_message_tool \
+    --content-file "$MD_OUT" \
+    --receipt-path "$RECEIPT_OUT" \
+    --note "delivery receipt written; awaiting actual send" >/dev/null
 else
   python3 "$TASK_STATE_PY" update \
     --task-id "$TASK_ID" \

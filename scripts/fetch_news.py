@@ -55,6 +55,7 @@ SOURCE_DISPLAY_NAMES = {
     "fetch_podcasts": "Podcasts",
     "fetch_essays": "Essays",
     "fetch_latentspace_ainews": "Latent Space AINews",
+    "fetch_tavily_search": "Tavily Search",
 }
 
 HN_API_BASE_URL = "https://hacker-news.firebaseio.com/v0"
@@ -596,6 +597,89 @@ def filter_items(items, keyword=None):
     pattern = '|'.join([r'\b' + re.escape(k) + r'\b' for k in keywords])
     regex = r'(?i)(' + pattern + r')'
     return [item for item in items if re.search(regex, item['title'])]
+
+
+def load_env_value_from_file(key, path=None):
+    env_path = path or os.getenv("OPENCLAW_SECRETS_ENV") or os.path.expanduser("~/.config/openclaw/secrets.env")
+    if not env_path or not os.path.exists(env_path):
+        return None
+
+    try:
+        with open(env_path, "r", encoding="utf-8") as handle:
+            for raw_line in handle:
+                line = raw_line.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                raw_key, raw_value = line.split("=", 1)
+                if raw_key.strip() != key:
+                    continue
+                value = raw_value.strip().strip('"').strip("'")
+                if value:
+                    os.environ.setdefault(key, value)
+                return value or None
+    except Exception:
+        return None
+
+
+def resolve_tavily_api_key():
+    api_key = os.getenv("TAVILY_API_KEY")
+    if api_key:
+        return api_key
+    return load_env_value_from_file("TAVILY_API_KEY")
+
+
+def normalize_tavily_query(keyword=None):
+    if not keyword:
+        return "Bitcoin Ethereum crypto market news"
+    keywords = [part.strip() for part in keyword.split(",") if part.strip()]
+    if not keywords:
+        return keyword.strip()
+    return " ".join(keywords)
+
+
+def fetch_tavily_search(limit=5, keyword=None):
+    query = normalize_tavily_query(keyword)
+    api_key = resolve_tavily_api_key()
+    if not api_key:
+        record_source_error("Tavily Search", RuntimeError("Missing TAVILY_API_KEY"), code="env")
+        return []
+
+    url = os.getenv("TAVILY_SEARCH_URL", "https://api.tavily.com/search")
+    payload = {
+        "api_key": api_key,
+        "query": query,
+        "search_depth": os.getenv("TAVILY_SEARCH_DEPTH", "basic"),
+        "max_results": max(1, min(int(limit) * 2, 10)),
+        "include_answer": False,
+        "include_raw_content": False,
+        "include_images": False,
+    }
+
+    try:
+        response = requests.post(url, json=payload, timeout=20)
+        response.raise_for_status()
+        data = response.json()
+    except Exception as e:
+        record_source_error("Tavily Search", e)
+        return []
+
+    items = []
+    for result in data.get("results", [])[:limit]:
+        title = result.get("title") or result.get("url") or "Tavily Result"
+        summary = result.get("content") or result.get("raw_content") or ""
+        published = result.get("published_date") or result.get("published_at") or result.get("date") or "Real-time"
+        score = result.get("score")
+        heat = f"score {float(score):.2f}" if isinstance(score, (int, float)) else (str(score) if score is not None else "")
+        items.append({
+            "source": "Tavily Search",
+            "title": title,
+            "url": result.get("url"),
+            "time": published,
+            "heat": heat,
+            "summary": compact_text(summary, 280) or "",
+        })
+
+    return filter_items(items, keyword)[:limit]
 
 def fetch_url_content(url):
     """
@@ -1324,6 +1408,7 @@ def build_sources_map():
         "podcasts": fetch_podcasts,
         "essays": fetch_essays,
         "latentspace_ainews": fetch_latentspace_ainews,
+        "tavily": fetch_tavily_search,
     }
 
     for name, url in AI_NEWSLETTER_SOURCES:

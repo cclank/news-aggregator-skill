@@ -1,0 +1,22 @@
+{
+  "name": "crypto_daily",
+  "sections": {
+    "top_stories": {
+      "enrich": true,
+      "sources": [
+        { "source": "tavily", "limit": 5, "keyword": "Bitcoin,Ethereum,Crypto,DeFi,Web3,ETF,Binance" },
+        { "source": "hackernews", "limit": 5, "keyword": "Bitcoin,Ethereum,Crypto,DeFi,Web3" },
+        { "source": "github", "limit": 3, "keyword": "bitcoin,ethereum,web3,crypto" },
+        { "source": "36kr", "limit": 5, "keyword": "加密货币，比特币，以太坊" },
+        { "source": "wallstreetcn", "limit": 4, "keyword": "比特币 ETF，数字资产" }
+      ]
+    },
+    "market_pulse": {
+      "enrich": false,
+      "sources": [
+        { "source": "v2ex", "limit": 3, "keyword": "加密货币，比特币" },
+        { "source": "producthunt", "limit": 3, "keyword": "crypto,web3,nft" }
+      ]
+    }
+  }
+}

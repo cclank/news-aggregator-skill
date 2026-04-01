@@ -2,154 +2,70 @@ import json
 import concurrent.futures
 import sys
 import os
+from pathlib import Path
 from fetch_news import (
+    build_sources_map,
     clear_source_errors,
-    EXIT_SUCCESS,
+    default_health_path,
     MISSING_DEPENDENCY_ERROR,
     annotate_items,
     apply_deep_enrichment,
     count_items,
+    dedupe_items,
     dedupe_failed_sources,
     determine_status_and_exit_code,
     emit_stdout_summary,
-    fetch_hackernews, fetch_github, fetch_producthunt, 
-    fetch_weibo, fetch_36kr, fetch_tencent, fetch_v2ex, fetch_wallstreetcn,
-    fetch_huggingface_papers, fetch_ai_newsletters, fetch_podcasts, fetch_essays,
+    filter_items_by_age,
     get_recorded_source_errors,
     now_utc,
     record_source_error,
     source_display_name,
     to_iso,
+    update_health_state,
     write_json_file,
     write_markdown_file
 )
 
 import argparse
 
-# --- Profile Configurations ---
-
-PROFILES = {
-    # 1. 综合早报 (General Morning Routine)
-    "general": {
-        "global_scan": {
-            "sources": [
-                (fetch_hackernews, 5, None),
-                (fetch_producthunt, 5, None),
-                (fetch_github, 5, None),
-                (fetch_weibo, 5, None),
-                (fetch_36kr, 5, None),
-                (fetch_tencent, 5, None),
-                (fetch_wallstreetcn, 5, None),
-                (fetch_v2ex, 5, None)
-            ],
-            "enrich": True
-        },
-        "hn_ai": {
-            "sources": [(fetch_hackernews, 20, "AI,LLM,GPT,DeepSeek,Github Copilot,Claude,OpenAI")],
-            "enrich": True
-        },
-        "github_trending": {
-            "sources": [(fetch_github, 15, None)],
-            "enrich": True
-        }
-    },
-
-    # 2. 财经早报 (Finance)
-    "finance": {
-        "market_overview": {
-            "sources": [
-                (fetch_wallstreetcn, 30, None),
-                (fetch_hackernews, 10, "Economy,Inflation,Fed,Stock,Finance")
-            ],
-            "enrich": True
-        },
-        "china_finance": {
-            "sources": [
-                (fetch_36kr, 20, "财报,营收,上市,IPO,基金,投资"),
-                (fetch_tencent, 15, "财经,股票,基金")
-            ],
-            "enrich": True
-        },
-        "crypto": {
-            "sources": [
-                (fetch_hackernews, 15, "Bitcoin,Crypto,Ethereum,Blockchain,Web3,DeFi"),
-                (fetch_wallstreetcn, 10, "比特币,加密货币")
-            ],
-            "enrich": True
-        }
-    },
-
-    # 3. 科技早报 (Tech)
-    "tech": {
-        "ai_frontier": {
-            "sources": [
-                (fetch_hackernews, 25, "AI,LLM,Transformer,Diffusion,Model,RAG"),
-                (fetch_github, 10, "AI,LLM,GPT")
-            ],
-            "enrich": True
-        },
-        "dev_tools": {
-            "sources": [
-                (fetch_producthunt, 20, "Developer Tools,Coding,API"),
-                (fetch_github, 15, None)
-            ],
-            "enrich": True
-        },
-        "startups": {
-            "sources": [(fetch_36kr, 20, "融资,首发,独角兽,创投"), (fetch_producthunt, 10, None)],
-            "enrich": True
-        }
-    },
-
-    # 4. 吃瓜早报 (Social/Gossip)
-    "social": {
-        "weibo_hot": {
-            "sources": [(fetch_weibo, 40, None)],
-            "enrich": False # No need for deep verify, just title/heat
-        },
-        "v2ex_hot": {
-            "sources": [(fetch_v2ex, 30, None)],
-            "enrich": True # Content is fun
-        }
-    },
-
-    # 5. GitHub Trending (Github Only)
-    "github": {
-        "github_trending": {
-            "sources": [(fetch_github, 20, None)],
-            "enrich": True
-        }
-    },
+PROFILES_DIR = Path(__file__).resolve().parent.parent / "profiles"
 
 
-    # 6. AI Daily (AI Deep Dive)
-    "ai_daily": {
-        "newsletter_picks": {
-            "sources": [(fetch_ai_newsletters, 100, None)], # Capture all (approx 30-40)
-            "enrich": True
-        },
-        "huggingface_papers": {
-            "sources": [(fetch_huggingface_papers, 20, None)], 
-            "enrich": True
-        }
-    },
+def load_profiles():
+    sources_map = build_sources_map()
+    profiles = {}
 
-    # 7. Reading List (Podcasts & Essays)
-    "reading_list": {
-        "essays": {
-            "sources": [(fetch_essays, 50, None)], # Capture all
-            "enrich": True
-        },
-        "podcasts": {
-            "sources": [(fetch_podcasts, 50, None)],
-            "enrich": False 
-        },
-        "hn_deep": {
-            "sources": [(fetch_hackernews, 20, "blog,essay,philosophy,book")],
-            "enrich": True
-        }
-    }
-}
+    for path in sorted(PROFILES_DIR.glob("*.json")):
+        with open(path, "r", encoding="utf-8") as handle:
+            raw_profile = json.load(handle)
+
+        profile_name = raw_profile.get("name") or path.stem
+        raw_sections = raw_profile.get("sections", raw_profile)
+        sections = {}
+
+        for section_name, raw_section in raw_sections.items():
+            resolved_sources = []
+            for source_spec in raw_section.get("sources", []):
+                source_key = source_spec["source"]
+                if source_key not in sources_map:
+                    raise ValueError(f"Unknown source key '{source_key}' in profile '{profile_name}'")
+                resolved_sources.append(
+                    (
+                        sources_map[source_key],
+                        int(source_spec.get("limit", 10)),
+                        source_spec.get("keyword"),
+                    )
+                )
+            sections[section_name] = {
+                "sources": resolved_sources,
+                "enrich": bool(raw_section.get("enrich", False)),
+            }
+
+        profiles[profile_name] = sections
+
+    if not profiles:
+        raise ValueError(f"No profile configs found in {PROFILES_DIR}")
+    return profiles
 
 
 def fetch_section(section_name, config, run_at, max_age_minutes=None, deep_top_n=None):
@@ -180,19 +96,9 @@ def fetch_section(section_name, config, run_at, max_age_minutes=None, deep_top_n
                 )
                 print(f"[{section_name}] {source_info['source']} failed: {e}", file=sys.stderr)
 
+    results = dedupe_items(results)
     results = annotate_items(results, run_at)
-    if max_age_minutes is not None:
-        filtered = []
-        dropped = 0
-        for item in results:
-            age_minutes = item.get("age_minutes")
-            if age_minutes is not None and age_minutes > max_age_minutes:
-                dropped += 1
-                continue
-            filtered.append(item)
-        if dropped:
-            print(f"[{section_name}] Filtered {dropped} stale item(s)", file=sys.stderr)
-        results = filtered
+    results = filter_items_by_age(results, max_age_minutes)
 
     # Enrich if requested
     if config["enrich"] and results:
@@ -233,8 +139,9 @@ def save_individual_sources(data, base_dir):
     return list(source_map.keys())
 
 def main():
+    profiles = load_profiles()
     parser = argparse.ArgumentParser()
-    parser.add_argument('--profile', default='general', choices=PROFILES.keys(), help='Briefing Profile')
+    parser.add_argument('--profile', default='general', choices=profiles.keys(), help='Briefing Profile')
     parser.add_argument('--outdir', help='Optional output directory for individual files')
     parser.add_argument('--no-save', action='store_true', help='Skip saving JSON files to disk (only output to stdout)')
     parser.add_argument('--json-out', help='Write run JSON to this path')
@@ -242,6 +149,8 @@ def main():
     parser.add_argument('--stdout-summary', action='store_true', help='Print a one-line machine-readable JSON summary to stdout')
     parser.add_argument('--max-age-minutes', type=int, help='Drop items older than this many minutes when age can be determined')
     parser.add_argument('--deep-top-n', type=int, help='Only deep-enrich the first N items in each section')
+    parser.add_argument('--format', choices=['full', 'telegram'], default='full', help='Markdown output format')
+    parser.add_argument('--health-out', default=default_health_path(), help='Write per-source health state JSON to this path')
     args = parser.parse_args()
     
     run_at = now_utc()
@@ -264,15 +173,21 @@ def main():
         if args.json_out:
             write_json_file(payload, args.json_out)
         if args.md_out:
-            write_markdown_file(payload, args.md_out)
+            write_markdown_file(payload, args.md_out, output_format=args.format)
+        update_health_state(
+            args.health_out,
+            run_at,
+            [{"source_key": "runtime", "source": "runtime"}],
+            payload["failed_sources"],
+        )
         if args.stdout_summary:
-            emit_stdout_summary(payload, 60, args.json_out, args.md_out)
+            emit_stdout_summary(payload, 60, args.json_out, args.md_out, output_format=args.format, health_out=args.health_out)
         else:
             print(json.dumps(payload, indent=2, ensure_ascii=False))
         return 60
 
     clear_source_errors()
-    config = PROFILES.get(args.profile, PROFILES['general'])
+    config = profiles.get(args.profile, profiles['general'])
     final_data = {}
     
     # Fetch all sections
@@ -317,10 +232,16 @@ def main():
     if json_out:
         write_json_file(payload, json_out)
     if md_out:
-        write_markdown_file(payload, md_out)
+        write_markdown_file(payload, md_out, output_format=args.format)
+
+    requested_sources = []
+    for sec_config in config.values():
+        for func, _, _ in sec_config["sources"]:
+            requested_sources.append({"source_key": func.__name__, "source": source_display_name(func)})
+    update_health_state(args.health_out, run_at, requested_sources, failed_sources)
 
     if args.stdout_summary:
-        emit_stdout_summary(payload, exit_code, json_out, md_out)
+        emit_stdout_summary(payload, exit_code, json_out, md_out, output_format=args.format, health_out=args.health_out)
     else:
         print(json.dumps(payload, indent=2, ensure_ascii=False))
 
@@ -334,6 +255,8 @@ def main():
         print(f"Unified JSON: {json_out}", file=sys.stderr)
     if md_out:
         print(f"Markdown summary: {md_out}", file=sys.stderr)
+    if args.health_out:
+        print(f"Health state: {args.health_out}", file=sys.stderr)
     return exit_code
 
 if __name__ == "__main__":

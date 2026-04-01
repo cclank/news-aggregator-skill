@@ -107,11 +107,19 @@ def fetch_rss_feed(url, source_name, limit=5, error_callback=None):
             "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
             "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8"
         }
-        
-        response = requests.get(url, headers=headers, timeout=15, verify=False)
-        response.encoding = response.apparent_encoding or 'utf-8'
-        
-        return parse_rss_content(response.content, source_name, limit, error_callback=error_callback)
+
+        last_error = None
+        for timeout in (15, 20):
+            try:
+                response = requests.get(url, headers=headers, timeout=timeout, verify=False)
+                response.raise_for_status()
+                response.encoding = response.apparent_encoding or 'utf-8'
+                return parse_rss_content(response.content, source_name, limit, error_callback=error_callback)
+            except Exception as exc:
+                last_error = exc
+                continue
+
+        raise last_error if last_error is not None else RuntimeError("Unknown RSS fetch failure")
 
     except Exception as e:
         if error_callback:

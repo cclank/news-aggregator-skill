@@ -4,6 +4,7 @@
     "top_stories": {
       "enrich": true,
       "sources": [
+        { "source": "ddgs_news", "limit": 3, "keyword": "Bitcoin,Ethereum,Crypto,DeFi,Web3,ETF,Binance" },
         { "source": "tavily", "limit": 5, "keyword": "Bitcoin,Ethereum,Crypto,DeFi,Web3,ETF,Binance" },
         { "source": "hackernews", "limit": 5, "keyword": "Bitcoin,Ethereum,Crypto,DeFi,Web3" },
         { "source": "github", "limit": 3, "keyword": "bitcoin,ethereum,web3,crypto" },

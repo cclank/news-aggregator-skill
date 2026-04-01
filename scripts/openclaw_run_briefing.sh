@@ -20,6 +20,7 @@ fi
 OUT_DIR="$REPO_DIR/reports/openclaw"
 JSON_OUT="$OUT_DIR/${PROFILE}_briefing.json"
 MD_OUT="$OUT_DIR/${PROFILE}_briefing.md"
+HEALTH_OUT="$OUT_DIR/source_health.json"
 mkdir -p "$OUT_DIR"
 
 set +e
@@ -28,6 +29,7 @@ SUMMARY="$(
     --profile "$PROFILE" \
     --json-out "$JSON_OUT" \
     --md-out "$MD_OUT" \
+    --health-out "$HEALTH_OUT" \
     --stdout-summary \
     --no-save \
     "$@"

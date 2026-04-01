@@ -56,6 +56,8 @@ SOURCE_DISPLAY_NAMES = {
     "fetch_essays": "Essays",
     "fetch_latentspace_ainews": "Latent Space AINews",
     "fetch_tavily_search": "Tavily Search",
+    "fetch_ddgs_text": "DuckDuckGo Search",
+    "fetch_ddgs_news": "DDGS News",
 }
 
 HN_API_BASE_URL = "https://hacker-news.firebaseio.com/v0"
@@ -637,6 +639,122 @@ def normalize_tavily_query(keyword=None):
     return " ".join(keywords)
 
 
+def normalize_ddgs_query(keyword=None):
+    return normalize_tavily_query(keyword)
+
+
+def ddgs_query_variants(keyword=None, search_type="text"):
+    variants = []
+    if not keyword and search_type == "news":
+        return ["crypto market", "business news", "world news"]
+    primary = normalize_ddgs_query(keyword)
+    if primary:
+        variants.append(primary)
+    if keyword:
+        keywords = [part.strip() for part in keyword.split(",") if part.strip()]
+        if keywords:
+            fallback = normalize_ddgs_query(keywords[0])
+            if fallback and fallback not in variants:
+                variants.append(fallback)
+    return variants or [normalize_ddgs_query(None)]
+
+
+def load_ddgs():
+    from ddgs import DDGS
+    return DDGS
+
+
+def run_ddgs_query(search_type, query, backend, max_results):
+    DDGS = load_ddgs()
+    results = DDGS()
+    payload = getattr(results, search_type)(query, backend=backend, max_results=max_results)
+    return list(payload)
+
+
+def normalize_ddgs_text_result(result, query, backend):
+    title = result.get("title") or result.get("href") or "DuckDuckGo Result"
+    return {
+        "source": "DuckDuckGo Search",
+        "title": title,
+        "url": result.get("href"),
+        "time": "Real-time",
+        "heat": "",
+        "summary": compact_text(result.get("body", ""), 280) or "",
+        "provider": "ddgs",
+        "provider_type": "text",
+        "provider_backend": backend,
+        "provider_query": query,
+    }
+
+
+def normalize_ddgs_news_result(result, query, backend):
+    title = result.get("title") or result.get("url") or "DDGS News Result"
+    return {
+        "source": "DDGS News",
+        "title": title,
+        "url": result.get("url"),
+        "time": result.get("date") or "Real-time",
+        "heat": "",
+        "summary": compact_text(result.get("body", ""), 280) or "",
+        "provider": "ddgs",
+        "provider_type": "news",
+        "provider_backend": backend,
+        "provider_query": query,
+    }
+
+
+def fetch_ddgs_text(limit=5, keyword=None):
+    attempts = [
+        ("duckduckgo", "DuckDuckGo Search"),
+        ("auto", "DuckDuckGo Search"),
+    ]
+    last_error = None
+    for query in ddgs_query_variants(keyword, search_type="text"):
+        for backend, source_name in attempts:
+            try:
+                results = run_ddgs_query("text", query, backend, max(1, min(int(limit) * 2, 20)))
+            except Exception as exc:
+                last_error = exc
+                continue
+            if not results:
+                last_error = RuntimeError(f"DDGS text returned no results for backend={backend}")
+                continue
+            items = [normalize_ddgs_text_result(result, query, backend) for result in results[:limit]]
+            filtered = filter_items(items, keyword)[:limit]
+            if filtered:
+                return filtered
+            return items[:limit]
+
+    if last_error is not None:
+        record_source_error("DuckDuckGo Search", last_error, context={"source_key": "ddgs"})
+    return []
+
+
+def fetch_ddgs_news(limit=5, keyword=None):
+    last_error = None
+    for query in ddgs_query_variants(keyword, search_type="news"):
+        for _ in range(2):
+            try:
+                results = run_ddgs_query("news", query, "auto", max(1, min(int(limit) * 2, 20)))
+            except Exception as exc:
+                last_error = exc
+                continue
+
+            if not results:
+                last_error = RuntimeError("DDGS news returned no results for backend=auto")
+                continue
+
+            items = [normalize_ddgs_news_result(result, query, "auto") for result in results[:limit]]
+            filtered = filter_items(items, keyword)[:limit]
+            if filtered:
+                return filtered
+            return items[:limit]
+
+    if last_error is not None:
+        record_source_error("DDGS News", last_error, context={"source_key": "ddgs_news"})
+    return []
+
+
 def fetch_tavily_search(limit=5, keyword=None):
     query = normalize_tavily_query(keyword)
     api_key = resolve_tavily_api_key()
@@ -862,7 +980,7 @@ def fetch_hackernews_api(limit=5, keyword=None):
         session = requests.Session()
         session.headers.update(HEADERS)
 
-        fetch_depth = min(max(limit * (8 if keyword else 4), 30), 120)
+        fetch_depth = min(max(limit * (6 if keyword else 3), 20), 80)
         endpoints = ["topstories", "beststories", "newstories"]
         if keyword and re.search(r"(?i)(show hn|ask hn|launch|startup|yc|founder)", keyword):
             endpoints.extend(["showstories", "askstories"])
@@ -870,9 +988,13 @@ def fetch_hackernews_api(limit=5, keyword=None):
         candidate_ids = []
         seen_ids = set()
         for list_name in endpoints:
-            ids_response = session.get(endpoint(list_name), timeout=10)
-            ids_response.raise_for_status()
-            ids = ids_response.json() or []
+            try:
+                ids_response = session.get(endpoint(list_name), timeout=(5, 10))
+                ids_response.raise_for_status()
+                ids = ids_response.json() or []
+            except Exception as exc:
+                record_source_error(display_name, exc, context={"source_key": "fetch_hackernews_api", "list": list_name})
+                continue
             for item_id in ids[:fetch_depth]:
                 if item_id in seen_ids:
                     continue
@@ -883,12 +1005,12 @@ def fetch_hackernews_api(limit=5, keyword=None):
             return []
 
         def fetch_item(item_id):
-            response = requests.get(endpoint(f"item/{item_id}"), headers=HEADERS, timeout=10)
+            response = session.get(endpoint(f"item/{item_id}"), timeout=(5, 10))
             response.raise_for_status()
             return response.json()
 
         items = []
-        with concurrent.futures.ThreadPoolExecutor(max_workers=16) as executor:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=8) as executor:
             futures = [executor.submit(fetch_item, item_id) for item_id in candidate_ids]
             for future in concurrent.futures.as_completed(futures):
                 try:
@@ -1093,10 +1215,20 @@ def fetch_tencent(limit=5, keyword=None):
         url = "https://i.news.qq.com/web_backend/v2/getTagInfo?tagId=aEWqxLtdgmQ%3D"
         data = requests.get(url, headers={"Referer": "https://news.qq.com/"}, timeout=10).json()
         items = []
-        for news in data['data']['tabs'][0]['articleList']:
+        tabs = data.get("data", {}).get("tabs", [])
+        article_list = tabs[0].get("articleList", []) if tabs else []
+        for news in article_list:
+            title = (
+                news.get("title")
+                or news.get("name")
+                or news.get("topic_name")
+                or news.get("card_title")
+            )
+            if not title:
+                continue
             items.append({
                 "source": "Tencent News", 
-                "title": news['title'], 
+                "title": title,
                 "url": news.get('url') or news.get('link_info', {}).get('url'),
                 "time": news.get('pub_time', '') or news.get('publish_time', '')
             })
@@ -1409,6 +1541,8 @@ def build_sources_map():
         "essays": fetch_essays,
         "latentspace_ainews": fetch_latentspace_ainews,
         "tavily": fetch_tavily_search,
+        "ddgs": fetch_ddgs_text,
+        "ddgs_news": fetch_ddgs_news,
     }
 
     for name, url in AI_NEWSLETTER_SOURCES:
@@ -1543,7 +1677,13 @@ def main():
     results = run_fetchers(requested_specs, args.limit, args.keyword)
 
     min_items = 5
-    if args.keyword and len(results) < min_items and requested_specs:
+    smart_fill_excluded = {"ddgs", "ddgs_news"}
+    if (
+        args.keyword
+        and len(results) < min_items
+        and requested_specs
+        and not set(requested_keys).issubset(smart_fill_excluded)
+    ):
         sys.stderr.write(f"Smart Fill triggered: Found {len(results)} items, filling gaps...\n")
         fill_results = run_fetchers(requested_specs, limit=min_items, keyword=None)
         existing_urls = {normalize_url(item.get("url")) for item in results}

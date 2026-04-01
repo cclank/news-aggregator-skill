@@ -11,7 +11,7 @@
 
 ## ✨ 核心特性
 
-- **🌍 全网多源聚合**：一站式覆盖跨越硅谷科技、中国创投、开源社区、金融市场以及顶级 AI 播客/硬核推文的 28+ 个高价值信源。
+- **🌍 全网多源聚合**：一站式覆盖跨越硅谷科技、中国创投、开源社区、金融市场以及顶级 AI 播客/硬核推文的 33 个高价值信源。
 - **🚀 完美支持 OpenClaw**：专为原生大模型 Agent 平台（如 OpenClaw、Code Agent）深度定制，即插即用，沉浸式体验信息流。
 - **🆓 开箱即用 (Zero-Config)**：纯净抓取，**无需配置任何第三方 API Key**，告别繁琐的环境变量和额度焦虑。
 - **🧠 AI 智能深度阅读 (Deep Fetch)**：智能穿透防爬虫机制（内置 Playwright 绕过 Cloudflare），抓取完整正文内容交给大模型过滤、提炼与总结。
@@ -26,7 +26,7 @@
 
 ## 📚 聚合信源图谱
 
-系统现已覆盖全球 **28** 个主流高价值信息渠道，随取随用：
+系统现已覆盖全球 **33** 个主流高价值信息渠道，随取随用：
 
 ### 🎯 核心新闻源
 - **全球科技**：🦄 Hacker News (`hackernews`), 🐱 Product Hunt (`producthunt`)
@@ -34,6 +34,11 @@
 - **国内风控**：🚀 36Kr (`36kr`), 🐧 腾讯科技 (`tencent`)
 - **社会金融**：🔴 微博热搜 (`weibo`), 📈 华尔街见闻 (`wallstreetcn`)
 - **AI 论文**：🤗 Hugging Face Papers (`huggingface`)
+
+### 🔎 搜索适配源
+- **DuckDuckGo Text Search** (`ddgs`) - 本地免 Key 文本检索，优先使用 `backend="duckduckgo"`，失败后退到 `auto`
+- **DDGS News** (`ddgs_news`) - 实验性新闻检索，当前使用 `backend="auto"`，适合灰度验证，不建议单独替代稳定新闻链路
+- **Tavily Search** (`tavily`) - 仍保留为稳定兜底搜索源，需要 `TAVILY_API_KEY`
 
 ### 📧 AI 行业内参 (Newsletters & Creators)
 - **🧪 Latent Space AINews** (`latentspace_ainews`) - *（近期新增）*
@@ -112,13 +117,13 @@ For heavy full-briefing runs, prefer local execution over OpenClaw cron agentTur
 
 #### Full Tech Briefing
 ```bash
-cd /Users/qihan/.openclaw/workspace/news-aggregator-skill
+cd /path/to/news-aggregator-skill
 bash scripts/run_full_briefing_local.sh tech --deep-top-n 3 --max-age-minutes 1440
 ```
 
 #### Full AI Daily
 ```bash
-cd /Users/qihan/.openclaw/workspace/news-aggregator-skill
+cd /path/to/news-aggregator-skill
 bash scripts/run_full_briefing_local.sh ai_daily --deep-top-n 5 --max-age-minutes 2880
 ```
 
@@ -204,6 +209,19 @@ python3 scripts/fetch_news.py --source hackernews,github --format telegram --md-
 python3 scripts/daily_briefing.py --profile general --format telegram --md-out /tmp/general_telegram.md
 scripts/openclaw_run_briefing.sh general --format telegram
 ```
+
+DDGS 搜索源示例：
+
+```bash
+python3 scripts/fetch_news.py --source ddgs --keyword "Bitcoin,Ethereum,Crypto" --no-save
+python3 scripts/fetch_news.py --source ddgs_news --keyword "crypto market,Binance" --no-save
+```
+
+说明：
+
+- `ddgs` 适合 text search 候选链接召回
+- `ddgs_news` 目前仍按实验源管理
+- `tavily` 继续作为稳定 fallback 保留
 
 `daily_briefing.py` 的 profile 定义现位于 `profiles/*.json`。单个 profile 文件结构如下：
 

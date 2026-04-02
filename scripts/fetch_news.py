@@ -601,6 +601,71 @@ def filter_items(items, keyword=None):
     return [item for item in items if re.search(regex, item['title'])]
 
 
+def get_url_parts(url):
+    try:
+        parsed = urlsplit(url or "")
+    except Exception:
+        return "", ""
+    host = (parsed.netloc or "").lower()
+    if host.startswith("www."):
+        host = host[4:]
+    path = parsed.path or "/"
+    return host, path
+
+
+def item_age_minutes_from_time(raw_time, now=None):
+    published_dt = parse_published_datetime(raw_time)
+    if published_dt is None:
+        return None
+    current = now or now_utc()
+    age_seconds = (current - published_dt.astimezone(timezone.utc)).total_seconds()
+    return max(int(age_seconds // 60), 0)
+
+
+def apply_search_quality_filters(items, source_key, max_age_minutes=None):
+    filtered = []
+    dropped = 0
+    current = now_utc()
+
+    for item in items:
+        host, path = get_url_parts(item.get("url"))
+        title = (item.get("title") or "").strip()
+        summary = (item.get("summary") or "").strip()
+        title_lower = title.lower()
+        summary_lower = summary.lower()
+
+        age_minutes = item_age_minutes_from_time(item.get("time"), current)
+        if max_age_minutes is not None and age_minutes is not None and age_minutes > max_age_minutes:
+            dropped += 1
+            continue
+
+        if host and path in {"", "/"}:
+            dropped += 1
+            continue
+
+        if source_key == "ddgs_news":
+            if host.endswith("msn.com"):
+                dropped += 1
+                continue
+            if title_lower.startswith("latest crypto") or title_lower.startswith("latest bitcoin"):
+                dropped += 1
+                continue
+
+        if source_key == "tavily":
+            low_signal_title = any(token in title_lower for token in ["how to buy", "buy ", "purchase options", "easy how to buy", "guide"]) \
+                or any(token in summary_lower for token in ["how to buy", "purchase options", "web3 wallet", "isn't available on the binance exchange"])
+            low_signal_path = any(token in path.lower() for token in ["/how-to-buy/", "/buy/", "/price/", "/price-prediction/"])
+            if low_signal_title or low_signal_path:
+                dropped += 1
+                continue
+
+        filtered.append(item)
+
+    if dropped:
+        print(f"Filtered {dropped} low-signal item(s) from {source_key}", file=sys.stderr)
+    return filtered
+
+
 def load_env_value_from_file(key, path=None):
     env_path = path or os.getenv("OPENCLAW_SECRETS_ENV") or os.path.expanduser("~/.config/openclaw/secrets.env")
     if not env_path or not os.path.exists(env_path):
@@ -732,6 +797,7 @@ def fetch_ddgs_text(limit=5, keyword=None):
 
 def fetch_ddgs_news(limit=5, keyword=None):
     last_error = None
+    max_age_minutes = int(os.getenv("DDGS_NEWS_MAX_AGE_MINUTES", "4320"))
     for query in ddgs_query_variants(keyword, search_type="news"):
         for _ in range(2):
             try:
@@ -745,10 +811,16 @@ def fetch_ddgs_news(limit=5, keyword=None):
                 continue
 
             items = [normalize_ddgs_news_result(result, query, "auto") for result in results[:limit]]
-            filtered = filter_items(items, keyword)[:limit]
+            filtered = filter_items(items, keyword)
+            filtered = apply_search_quality_filters(filtered, "ddgs_news", max_age_minutes=max_age_minutes)[:limit]
             if filtered:
                 return filtered
-            return items[:limit]
+            filtered_items = apply_search_quality_filters(items, "ddgs_news", max_age_minutes=max_age_minutes)[:limit]
+            if filtered_items:
+                return filtered_items
+
+            last_error = RuntimeError("DDGS news results were filtered as low-signal")
+            continue
 
     if last_error is not None:
         record_source_error("DDGS News", last_error, context={"source_key": "ddgs_news"})
@@ -782,7 +854,7 @@ def fetch_tavily_search(limit=5, keyword=None):
         return []
 
     items = []
-    for result in data.get("results", [])[:limit]:
+    for result in data.get("results", [])[: max(1, min(int(limit) * 2, 10))]:
         title = result.get("title") or result.get("url") or "Tavily Result"
         summary = result.get("content") or result.get("raw_content") or ""
         published = result.get("published_date") or result.get("published_at") or result.get("date") or "Real-time"
@@ -797,7 +869,11 @@ def fetch_tavily_search(limit=5, keyword=None):
             "summary": compact_text(summary, 280) or "",
         })
 
-    return filter_items(items, keyword)[:limit]
+    filtered = filter_items(items, keyword)
+    filtered = apply_search_quality_filters(filtered, "tavily")[:limit]
+    if filtered:
+        return filtered
+    return apply_search_quality_filters(items, "tavily")[:limit]
 
 def fetch_url_content(url):
     """
@@ -880,7 +956,7 @@ def fetch_hackernews(limit=5, keyword=None):
             # If we found nothing after all attempts, we might want to fall back to scraping frontpage 
             # but frontpage is unlikely to have keyword matches if deep search failed. 
             # However, returning [] is better than hallucinating.
-            return items[:limit]
+            return filter_items(items, keyword)[:limit]
             
         except Exception as e:
             record_source_error("Hacker News", e)
@@ -1111,6 +1187,9 @@ def fetch_github(limit=5, keyword=None):
                      # Actually standard topic page: <h3 class="f3"><a href="/user/repo">...
                      if not h3: continue
                      repo_link = h3['href'] # /user/repo
+                     segments = [segment for segment in repo_link.split('/') if segment]
+                     if len(segments) != 2:
+                         continue
                      title = repo_link.strip('/')
                      link = "https://github.com" + repo_link
                      

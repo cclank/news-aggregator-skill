@@ -5,7 +5,7 @@
       "enrich": true,
       "sources": [
         { "source": "ddgs_news", "limit": 3, "keyword": "Bitcoin,Ethereum,Crypto,DeFi,Web3,ETF,Binance" },
-        { "source": "tavily", "limit": 5, "keyword": "Bitcoin,Ethereum,Crypto,DeFi,Web3,ETF,Binance" },
+        { "source": "tavily", "limit": 5, "keyword": "Bitcoin,Ethereum,crypto market,spot ETF,stablecoin" },
         { "source": "hackernews", "limit": 5, "keyword": "Bitcoin,Ethereum,Crypto,DeFi,Web3" },
         { "source": "github", "limit": 3, "keyword": "bitcoin,ethereum,web3,crypto" },
         { "source": "36kr", "limit": 5, "keyword": "加密货币，比特币，以太坊" },
@@ -15,8 +15,9 @@
     "market_pulse": {
       "enrich": false,
       "sources": [
-        { "source": "v2ex", "limit": 3, "keyword": "加密货币，比特币" },
-        { "source": "producthunt", "limit": 3, "keyword": "crypto,web3,nft" }
+        { "source": "ddgs", "limit": 4, "keyword": "Bitcoin price,Ethereum price,crypto market,spot ETF" },
+        { "source": "hackernews", "limit": 4, "keyword": "Bitcoin,Crypto,Ethereum,ETF" },
+        { "source": "wallstreetcn", "limit": 4, "keyword": "比特币,以太坊,数字资产" }
       ]
     }
   }

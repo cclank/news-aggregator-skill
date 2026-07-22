@@ -1,6 +1,7 @@
 import argparse
 import json
 import sys
+import io
 import time
 import re
 import concurrent.futures
@@ -20,6 +21,15 @@ except ModuleNotFoundError as exc:
     MISSING_DEPENDENCY_ERROR = exc
     requests = None
     BeautifulSoup = None
+
+# Windows console defaults to cp936/GBK; force UTF-8 so Chinese JSON output isn't mangled.
+if sys.platform == 'win32':
+    try:
+        sys.stdout.reconfigure(encoding='utf-8')
+        sys.stderr.reconfigure(encoding='utf-8')
+    except Exception:
+        sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8')
+        sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8')
 
 # Headers for scraping to avoid basic bot detection
 HEADERS = {
@@ -591,6 +601,24 @@ def update_health_state(health_path, run_at, requested_sources, failed_sources):
 
     state["updated_at"] = to_iso(run_at)
     write_json_file(state, health_path)
+
+def filter_by_hours(items, hours=24):
+    """Keep only items published within the last N hours.
+    Items whose time cannot be parsed are kept (fail-open)."""
+    cutoff = datetime.now(timezone.utc) - timedelta(hours=hours)
+    result = []
+    for item in items:
+        t = item.get('time', '')
+        try:
+            pub = parsedate_to_datetime(str(t))
+            if pub.tzinfo is None:
+                pub = pub.replace(tzinfo=timezone.utc)
+            if pub >= cutoff:
+                result.append(item)
+        except Exception:
+            result.append(item)  # unparseable → keep
+    return result
+
 
 def filter_items(items, keyword=None):
     if not keyword:
@@ -1475,6 +1503,217 @@ def fetch_latentspace_ainews(limit=5, keyword=None):
     return filter_items(items[:limit], keyword)
 
 
+# --- Extended Sources (v2): Lobsters / Dev.to / arXiv / Papers with Code / 少数派 / 即刻 / User OPML ---
+
+def fetch_lobsters(limit=5, keyword=None):
+    """Lobsters hottest stories via official JSON API."""
+    items = []
+    try:
+        data = requests.get("https://lobste.rs/hottest.json", headers=HEADERS, timeout=10).json()
+        for story in data:
+            tags = ",".join(story.get('tags', []))
+            items.append({
+                "source": "Lobsters",
+                "title": story.get('title', ''),
+                "url": story.get('url') or story.get('short_id_url') or story.get('comments_url', ''),
+                "comments_url": story.get('comments_url', ''),
+                "heat": f"{story.get('score', 0)} points",
+                "time": story.get('created_at', '')[:10] if story.get('created_at') else '',
+                "tags": tags,
+            })
+    except Exception as e:
+        print(f"Lobsters fetch error: {e}", file=sys.stderr)
+    return filter_items(items[:limit], keyword)
+
+
+def fetch_devto(limit=5, keyword=None):
+    """Dev.to top articles of the past 24h via official JSON API."""
+    items = []
+    try:
+        url = "https://dev.to/api/articles?top=1&per_page=30"
+        data = requests.get(url, headers=HEADERS, timeout=10).json()
+        for art in data:
+            tag_list = art.get('tag_list', [])
+            tags = ",".join(tag_list) if isinstance(tag_list, list) else str(tag_list)
+            items.append({
+                "source": "Dev.to",
+                "title": art.get('title', ''),
+                "url": art.get('url', ''),
+                "heat": f"{art.get('positive_reactions_count', 0)} reactions",
+                "time": (art.get('published_at') or '')[:10],
+                "summary": art.get('description', ''),
+                "tags": tags,
+            })
+    except Exception as e:
+        print(f"Dev.to fetch error: {e}", file=sys.stderr)
+    return filter_items(items[:limit], keyword)
+
+
+def fetch_sspai(limit=5, keyword=None):
+    """少数派 latest articles via RSS."""
+    return filter_items(fetch_rss_feed("https://sspai.com/feed", "少数派", limit * 2)[:limit], keyword)
+
+
+# NOTE: Papers with Code (paperswithcode.com) was acquired/merged by Hugging Face
+# and now 302-redirects to huggingface.co/papers/trending. Duplicates `huggingface` source.
+# Removed from v2 sources. Use --source huggingface for trending papers.
+
+
+def fetch_arxiv(limit=5, keyword=None, categories=None):
+    """arXiv latest submissions in given CS categories via official Atom API.
+    arXiv 接口偶尔较慢，最多重试 3 次（timeout=45s，退避 2s/4s）。"""
+    cats = categories or ['cs.AI', 'cs.CL', 'cs.LG']
+    cat_query = '+OR+'.join(f'cat:{c}' for c in cats)
+    url = (
+        f"http://export.arxiv.org/api/query"
+        f"?search_query={cat_query}"
+        f"&sortBy=submittedDate&sortOrder=descending"
+        f"&max_results={limit * 2}"
+    )
+    items = []
+    from rss_parser import parse_rss_content
+    for attempt in range(3):
+        try:
+            response = requests.get(url, headers=HEADERS, timeout=45)
+            response.encoding = response.apparent_encoding or 'utf-8'
+            items = parse_rss_content(response.content, "arXiv", limit * 2)
+            if items:
+                break
+        except Exception as e:
+            print(f"arXiv attempt {attempt + 1}/3 error: {e}", file=sys.stderr)
+        if attempt < 2:
+            time.sleep(2 * (attempt + 1))  # 2s, 4s
+    return filter_items(items[:limit], keyword)
+
+
+def fetch_infoq_cn(limit=5, keyword=None):
+    """InfoQ 中文站最新文章 via RSS。"""
+    return filter_items(fetch_rss_feed("https://www.infoq.cn/feed.xml", "InfoQ 中文", limit * 2)[:limit], keyword)
+
+
+def fetch_aihot(limit=15, keyword=None):
+    """AIHOT (aihot.virxact.com) AI 精选聚合，跨源中文编辑稿，日更 ~50 条。
+    默认拉最近 24h 内容（日更源，50 条/天，取最多 limit 条）。"""
+    raw = fetch_rss_feed("https://aihot.virxact.com/rss", "AIHOT", max(limit * 4, 50))
+    items = filter_by_hours(raw, hours=24)
+    return filter_items(items[:limit], keyword)
+
+
+def fetch_tldr_ai(limit=3, keyword=None):
+    """TLDR AI 英文每日 AI 摘要，5-10 主题/期。
+    默认拉最近 48h（日刊时间戳为午夜 UTC，48h 确保任意时段都能拿到最新 1-2 期）。"""
+    raw = fetch_rss_feed("https://tldr.tech/api/rss/ai", "TLDR AI", limit * 4)
+    items = filter_by_hours(raw, hours=48)
+    return filter_items(items[:limit], keyword)
+
+
+def fetch_import_ai(limit=2, keyword=None):
+    """Import AI by Jack Clark（前 OpenAI/Anthropic 联创）周更深度评论。
+    默认拉最近 7 天（周刊，1 条 = 1 期 = 1 周），通常返回最新 1 期。"""
+    raw = fetch_rss_feed("https://importai.substack.com/feed", "Import AI", limit * 4)
+    items = filter_by_hours(raw, hours=168)  # 7 days
+    return filter_items(items[:limit], keyword)
+
+
+INTERNATIONAL_NEWS_SOURCES = [
+    ("BBC Top News", "https://feeds.bbci.co.uk/news/rss.xml"),
+    ("BBC World", "https://feeds.bbci.co.uk/news/world/rss.xml"),
+    ("BBC Chinese", "https://feeds.bbci.co.uk/zhongwen/simp/rss.xml"),
+    ("The Guardian World", "https://www.theguardian.com/world/rss"),
+    ("Al Jazeera", "https://www.aljazeera.com/xml/rss/all.xml"),
+    ("France 24", "http://www.france24.com/en/rss"),
+]
+
+REUTERS_GOOGLE_NEWS_RSS = (
+    "https://news.google.com/rss/search?"
+    "q=site%3Areuters.com%20when%3A1d&hl=en-US&gl=US&ceid=US%3Aen"
+)
+
+INTERNATIONAL_NEWS_MAX_AGE_HOURS = 24
+
+
+def fetch_recent_rss_feed(url, source_name, limit=10, keyword=None, hours=INTERNATIONAL_NEWS_MAX_AGE_HOURS):
+    """Fetch an RSS feed and keep only items from the recent time window."""
+    raw = fetch_rss_feed(url, source_name, max(limit * 4, 30))
+    items = filter_by_hours(raw, hours=hours)
+    return filter_items(items, keyword)[:limit]
+
+
+def create_recent_rss_fetcher(url, name, hours=INTERNATIONAL_NEWS_MAX_AGE_HOURS):
+    def fetcher(limit=5, keyword=None):
+        return fetch_recent_rss_feed(url, name, limit, keyword, hours)
+    return fetcher
+
+
+def fetch_reuters(limit=10, keyword=None):
+    """Reuters public fallback via Google News RSS.
+    Reuters.com no longer exposes a reliable unauthenticated public RSS feed."""
+    items = fetch_rss_feed(
+        REUTERS_GOOGLE_NEWS_RSS,
+        "Reuters (Google News fallback)",
+        max(limit * 4, 30),
+    )
+    items = filter_by_hours(items, hours=INTERNATIONAL_NEWS_MAX_AGE_HOURS)
+    for item in items:
+        title = item.get('title', '')
+        if title.endswith(' - Reuters'):
+            item['title'] = title[:-10]
+        item['fallback'] = "Google News RSS search for site:reuters.com"
+    return filter_items(items, keyword)[:limit]
+
+
+def fetch_international(limit=15, keyword=None):
+    """Aggregate official international RSS feeds plus Reuters fallback."""
+    per_source = max(2, min(5, limit // 3))
+    with concurrent.futures.ThreadPoolExecutor(max_workers=6) as executor:
+        tasks = [
+            (name, executor.submit(fetch_recent_rss_feed, url, name, per_source, keyword))
+            for name, url in INTERNATIONAL_NEWS_SOURCES
+        ]
+        tasks.append(("Reuters", executor.submit(fetch_reuters, per_source, keyword)))
+
+        item_groups = []
+        for name, future in tasks:
+            try:
+                items = future.result()
+                if items:
+                    item_groups.append(items)
+            except Exception as e:
+                print(f"International fetch error for {name}: {e}", file=sys.stderr)
+
+    merged = []
+    max_group_len = max((len(group) for group in item_groups), default=0)
+    for index in range(max_group_len):
+        for group in item_groups:
+            if index < len(group):
+                merged.append(group[index])
+            if len(merged) >= limit:
+                return merged
+    return merged
+
+
+def fetch_user_feeds(limit=5, keyword=None):
+    """Fetch user-defined RSS feeds from an OPML file.
+    Looks at ~/.config/news-aggregator/user_sources.opml first,
+    then <skill_root>/user_sources.opml."""
+    try:
+        # Add scripts/ to path for direct import
+        sys.path.insert(0, os.path.dirname(__file__))
+        from fetch_user_feeds import find_opml_file, parse_opml, fetch_all_feeds
+        opml_path = find_opml_file()
+        if not opml_path:
+            print("No OPML configured. See user_sources.opml.example", file=sys.stderr)
+            return []
+        feeds = parse_opml(opml_path)
+        if not feeds:
+            return []
+        items = fetch_all_feeds(feeds, limit_per_feed=3)
+        return filter_items(items[:limit], keyword)
+    except Exception as e:
+        print(f"User feeds error: {e}", file=sys.stderr)
+        return []
+
+
 # --- Source Definitions (Global for Access) ---
 
 AI_NEWSLETTER_SOURCES = [
@@ -1622,6 +1861,26 @@ def build_sources_map():
         "tavily": fetch_tavily_search,
         "ddgs": fetch_ddgs_text,
         "ddgs_news": fetch_ddgs_news,
+        # Extended (v2): tech community / academic / Chinese deep-content / user OPML
+        "lobsters": fetch_lobsters,
+        "devto": fetch_devto,
+        "sspai": fetch_sspai,
+        "infoq_cn": fetch_infoq_cn,
+        "arxiv": fetch_arxiv,
+        # Curated AI aggregators (v3): one feed = many original sources, pre-curated
+        "aihot": fetch_aihot,
+        "tldr_ai": fetch_tldr_ai,
+        "import_ai": fetch_import_ai,
+        # International news (official RSS where available; Reuters uses a marked fallback)
+        "international": fetch_international,
+        "bbc_top": create_recent_rss_fetcher("https://feeds.bbci.co.uk/news/rss.xml", "BBC Top News"),
+        "bbc_world": create_recent_rss_fetcher("https://feeds.bbci.co.uk/news/world/rss.xml", "BBC World"),
+        "bbc_chinese": create_recent_rss_fetcher("https://feeds.bbci.co.uk/zhongwen/simp/rss.xml", "BBC Chinese"),
+        "guardian_world": create_recent_rss_fetcher("https://www.theguardian.com/world/rss", "The Guardian World"),
+        "aljazeera": create_recent_rss_fetcher("https://www.aljazeera.com/xml/rss/all.xml", "Al Jazeera"),
+        "france24": create_recent_rss_fetcher("http://www.france24.com/en/rss", "France 24"),
+        "reuters": fetch_reuters,
+        "user": fetch_user_feeds,
     }
 
     for name, url in AI_NEWSLETTER_SOURCES:

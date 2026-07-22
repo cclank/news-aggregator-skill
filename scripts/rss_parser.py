@@ -1,5 +1,9 @@
 
 import sys
+import re
+import time
+from datetime import datetime
+
 MISSING_DEPENDENCY_ERROR = None
 try:
     import urllib3
@@ -15,7 +19,10 @@ if MISSING_DEPENDENCY_ERROR is None:
 
 def clean_text(text):
     if not text: return ""
-    return text.strip()
+    text = text.strip()
+    # html.parser leaves CDATA markers intact; strip them
+    text = re.sub(r'^\s*<!\[CDATA\[|\]\]>\s*$', '', text).strip()
+    return text
 
 def parse_rss_content(content, source_name, limit=5, error_callback=None):
     """
@@ -69,7 +76,8 @@ def parse_rss_content(content, source_name, limit=5, error_callback=None):
             elif content: raw_summary = content.get_text()
             
             soup_desc = BeautifulSoup(raw_summary, 'html.parser')
-            clean_summary = soup_desc.get_text(separator=' ', strip=True)[:300] + "..." if len(raw_summary) > 300 else ""
+            _summary_text = soup_desc.get_text(separator=' ', strip=True)
+            clean_summary = (_summary_text[:300] + "...") if len(_summary_text) > 300 else _summary_text
             
             # --- Heat ---
             heat = ""
@@ -109,15 +117,16 @@ def fetch_rss_feed(url, source_name, limit=5, error_callback=None):
         }
 
         last_error = None
-        for timeout in (15, 20):
+        for attempt in range(3):
             try:
-                response = requests.get(url, headers=headers, timeout=timeout, verify=False)
+                response = requests.get(url, headers=headers, timeout=15, verify=False)
                 response.raise_for_status()
                 response.encoding = response.apparent_encoding or 'utf-8'
                 return parse_rss_content(response.content, source_name, limit, error_callback=error_callback)
             except Exception as exc:
                 last_error = exc
-                continue
+                if attempt < 2:
+                    time.sleep(1 + attempt)
 
         raise last_error if last_error is not None else RuntimeError("Unknown RSS fetch failure")
 

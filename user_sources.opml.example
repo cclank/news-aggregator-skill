@@ -1,0 +1,53 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  user_sources.opml.example - User-defined RSS/Atom feeds template.
+
+  Usage:
+    1. Copy this file to user_sources.opml in skill root,
+       or to ~/.config/news-aggregator/user_sources.opml
+    2. Edit the outline list below to add your own feeds
+    3. Run: python scripts/fetch_news.py  source user  limit 15
+
+  Or export an OPML from Feedly / Inoreader / NetNewsWire to replace this file.
+
+  Only xmlUrl is required; title/text are for display.
+-->
+<opml version="2.0">
+  <head>
+    <title>My News Aggregator Feeds</title>
+  </head>
+  <body>
+    <!-- ===== Enabled by default (verified reachable) ===== -->
+
+    <!-- Simon Willison's Weblog (English, LLM and engineering) -->
+    <outline type="rss" text="Simon Willison" title="Simon Willison"
+             xmlUrl="https://simonwillison.net/atom/everything/"
+             htmlUrl="https://simonwillison.net/" />
+
+    <!-- 阮一峰的网络日志 (Chinese tech weekly digest) -->
+    <outline type="rss" text="阮一峰的网络日志" title="阮一峰的网络日志"
+             xmlUrl="https://www.ruanyifeng.com/blog/atom.xml"
+             htmlUrl="https://www.ruanyifeng.com/blog/" />
+
+
+    <!-- ===== Disabled by default (require VPN from mainland China) ===== -->
+    <!-- Uncomment the ones you want. All confirmed live but blocked in CN. -->
+
+    <!--
+    BBC 中文 (already built in as --source bbc_chinese; keep as a custom-feed example only)
+    <outline type="rss" text="BBC 中文" title="BBC 中文"
+             xmlUrl="https://feeds.bbci.co.uk/zhongwen/simp/rss.xml"
+             htmlUrl="https://www.bbc.com/zhongwen/simp" />
+
+    纽约时报中文网 (NYT Chinese)
+    <outline type="rss" text="纽约时报中文网" title="纽约时报中文网"
+             xmlUrl="https://cn.nytimes.com/rss.html"
+             htmlUrl="https://cn.nytimes.com/" />
+
+    Hacker News Front Page (high-signal English tech)
+    <outline type="rss" text="Hacker News Front Page" title="Hacker News Front Page"
+             xmlUrl="https://hnrss.org/frontpage"
+             htmlUrl="https://news.ycombinator.com/" />
+    -->
+  </body>
+</opml>

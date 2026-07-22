@@ -67,6 +67,58 @@
 
 ---
 
+### 🆕 扩展源 (v2)
+
+| # | 名称 | 命令 |
+|---|---|---|
+| 36 | 🦞 Lobsters 技术深度 | `--source lobsters` |
+| 37 | 👩‍💻 Dev.to 开发者热门 | `--source devto` |
+| 38 | 📜 arXiv AI 最新论文 (cs.AI/CL/LG) | `--source arxiv` |
+| 39 | 📕 少数派 (sspai) | `--source sspai` |
+| 40 | 💻 InfoQ 中文 (软件工程/AI) | `--source infoq_cn --deep` |
+
+---
+
+### 🎯 AI 精选聚合 (v3) —— 二次精选，密度最高
+
+> 这一档是别人的编辑团队替你筛过的 AI 高价值内容，单源信息密度顶 5-10 个原始信源。
+
+| # | 名称 | 命令 |
+|---|---|---|
+| 41 | 🔥 AIHOT 中文 AI 精选（跨源 + 中文编辑稿） | `--source aihot` |
+| 42 | 📨 TLDR AI（英文日刊，每天 5-10 主题摘要） | `--source tldr_ai` |
+| 43 | 📜 Import AI by Jack Clark（英文周刊深度评论） | `--source import_ai --deep` |
+| 44 | 🌐 AI 精选三件套（一次拉全） | `--source aihot,tldr_ai,import_ai` |
+
+---
+
+### 🔧 自定义订阅源
+
+| # | 名称 | 命令 |
+|---|---|---|
+| 45 | 🔧 我的订阅源 (OPML) | `--source user` |
+
+> 💡 **首次使用 OPML（45）**：先 `cp user_sources.opml.example user_sources.opml`，编辑里面的 `<outline xmlUrl="...">` 加自己的源；或从 Feedly/Inoreader 导出 OPML 覆盖即可。
+
+---
+
+### 🌍 国际新闻源
+
+| # | 名称 | 命令 |
+|---|---|---|
+| 46 | 🌍 国际新闻聚合 (最近 24h) | `--source international --limit 20` |
+| 47 | 📰 BBC Top News (最近 24h) | `--source bbc_top` |
+| 48 | 🌐 BBC World (最近 24h) | `--source bbc_world` |
+| 49 | 🈶 BBC 中文 (最近 24h) | `--source bbc_chinese` |
+| 50 | 🗞️ The Guardian World (最近 24h) | `--source guardian_world` |
+| 51 | 🛰️ Al Jazeera (最近 24h) | `--source aljazeera` |
+| 52 | 🇫🇷 France 24 (最近 24h) | `--source france24` |
+| 53 | 🧭 Reuters fallback (Google News RSS, 最近 24h) | `--source reuters` |
+
+> 💡 **输出与时间窗口**：国际新闻源必须按统一报告模板输出；抓取只保留最近 24 小时内容，不用旧闻补位。`reuters` 使用 Google News RSS 的 `site:reuters.com` 检索结果。Reuters 官方公开 RSS 不稳定；如有 Reuters Connect 账号，可把 authenticated RSS 放进 OPML。
+
+---
+
 ### 🔀 自由组合
 
 直接指定多个源，用逗号分隔：
@@ -79,4 +131,4 @@ hackernews,github,wallstreetcn
 
 ---
 
-**✨ 请输入序号 (1-35) 或源名组合来执行**
+**✨ 请输入序号 (1-53) 或源名组合来执行**

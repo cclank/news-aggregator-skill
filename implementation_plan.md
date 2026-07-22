@@ -12,7 +12,7 @@ The goal is to automate a global news scan at 6:30 AM daily. Since the AI agent 
 
 ### Scripts
 
-#### [NEW] [daily_scan.sh](file:///Users/lank/code/skillMake/news-aggregator-skill/scripts/daily_scan.sh)
+#### [NEW] [daily_scan.sh](scripts/daily_scan.sh)
 - A bash script acting as the entry point.
 - Activates the Python virtual environment.
 - Runs `fetch_news.py` with `--source all --limit 15 --deep`.
@@ -20,7 +20,7 @@ The goal is to automate a global news scan at 6:30 AM daily. Since the AI agent 
 - Calls `generate_basic_report.py` to convert JSON to Markdown.
 - Saves the report in a date-based subdirectory `reports/YYYY-MM-DD/` with a timestamped filename.
 
-#### [NEW] [generate_basic_report.py](file:///Users/lank/code/skillMake/news-aggregator-skill/scripts/generate_basic_report.py)
+#### [NEW] [generate_basic_report.py](scripts/generate_basic_report.py)
 - A simple Python script.
 - Reads JSON input from stdin or file.
 - Formats it into the standard `SKILL.md` Markdown style (excluding the AI Deep Dive section).

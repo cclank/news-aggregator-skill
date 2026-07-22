@@ -1,0 +1,27 @@
+{
+  "name": "finance",
+  "sections": {
+    "market_overview": {
+      "enrich": true,
+      "sources": [
+        { "source": "wallstreetcn", "limit": 30 },
+        { "source": "hackernews", "limit": 10, "keyword": "Economy,Inflation,Fed,Stock,Finance" }
+      ]
+    },
+    "china_finance": {
+      "enrich": true,
+      "sources": [
+        { "source": "36kr", "limit": 20, "keyword": "财报,营收,上市,IPO,基金,投资" },
+        { "source": "tencent", "limit": 15, "keyword": "财经,股票,基金" }
+      ]
+    },
+    "crypto": {
+      "enrich": true,
+      "sources": [
+        { "source": "tavily", "limit": 5, "keyword": "Bitcoin,Ethereum,Crypto,Web3,ETF,DeFi" },
+        { "source": "hackernews", "limit": 15, "keyword": "Bitcoin,Crypto,Ethereum,Blockchain,Web3,DeFi" },
+        { "source": "wallstreetcn", "limit": 10, "keyword": "比特币,加密货币" }
+      ]
+    }
+  }
+}

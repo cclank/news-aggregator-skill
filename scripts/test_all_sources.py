@@ -3,6 +3,7 @@ import subprocess
 import os
 import sys
 import shutil
+import json
 from datetime import datetime
 
 def get_all_sources():
@@ -29,13 +30,14 @@ def get_all_sources():
 def test_source(source, out_dir):
     """Run fetch_news.py for a single source"""
     print(f"Testing {source}...", end=' ', flush=True)
+    json_out = os.path.join(out_dir, f"{source}.json")
     cmd = [
         sys.executable, 
         'scripts/fetch_news.py', 
         '--source', source, 
         '--limit', '1', 
-        '--save',
-        '--outdir', out_dir
+        '--json-out', json_out,
+        '--stdout-summary',
     ]
     
     start_time = datetime.now()
@@ -43,25 +45,23 @@ def test_source(source, out_dir):
         # Timeout after 30s to prevent hanging
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=45)
         duration = (datetime.now() - start_time).total_seconds()
-        
-        if result.returncode == 0:
-            # Check if file was actually created
-            # fetch_news prints "[Saved] Raw Data: ...JSON"
-            if "Raw Data:" in result.stderr:
-                print(f"✅ PASS ({duration:.1f}s)")
-                return True, duration, None
-            else:
-                # It might have returned empty list [] and not saved anything?
-                # fetch_news only saves if data is not empty? 
-                # Let's check logic: "if args.save or ... md_file = save_report..."
-                # save_report writes file even if data is empty? 
-                # "if not data: f.write('No items found.')" -> Yes.
-                # So if it didn't save, something else happened.
-                print(f"⚠️ EMPTY/NO-SAVE ({duration:.1f}s)")
-                return False, duration, "Script ran but no save message found"
-        else:
-            print(f"❌ FAIL ({duration:.1f}s)")
-            return False, duration, result.stderr.strip()
+        summary_line = result.stdout.strip().splitlines()[-1] if result.stdout.strip() else ""
+        summary = json.loads(summary_line) if summary_line else {}
+
+        if result.returncode in (0, 10, 20) and os.path.exists(json_out):
+            note = summary.get("status") or ""
+            if result.returncode == 20:
+                print(f"⚠️ PARTIAL ({duration:.1f}s)")
+                return True, duration, note or "partial_success"
+            if result.returncode == 10:
+                print(f"⚠️ EMPTY ({duration:.1f}s)")
+                return True, duration, note or "empty"
+            print(f"✅ PASS ({duration:.1f}s)")
+            return True, duration, note
+
+        detail = result.stderr.strip() or summary.get("status") or "unknown failure"
+        print(f"❌ FAIL ({duration:.1f}s)")
+        return False, duration, detail
             
     except subprocess.TimeoutExpired:
         print("❌ TIMEOUT (45s)")

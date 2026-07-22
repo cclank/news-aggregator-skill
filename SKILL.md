@@ -26,6 +26,12 @@ python3 scripts/fetch_news.py --source all --limit 15 --deep --no-save
 
 # With keyword filter (auto-expand: "AI" → "AI,LLM,GPT,Claude,Agent,RAG")
 python3 scripts/fetch_news.py --source hackernews --keyword "AI,LLM,GPT" --deep --no-save
+
+# Machine-friendly run output
+python3 scripts/fetch_news.py --source hackernews --json-out /tmp/hn.json --md-out /tmp/hn.md --stdout-summary
+
+# Telegram-friendly markdown
+python3 scripts/fetch_news.py --source hackernews,github --format telegram --md-out /tmp/scan_telegram.md
 ```
 
 ### Step 2: Generate Report
@@ -76,8 +82,15 @@ Only the **differences** from the universal template:
 | `--limit` | Max items per source | `15` |
 | `--keyword` | Comma-separated keyword filter | None |
 | `--deep` | Download article text for richer analysis | Off |
+| `--deep-top-n` | Only deep-enrich the first N items | All items |
+| `--max-age-minutes` | Filter out stale items when publish time is parseable | None |
 | `--save` | Force save to reports dir | Auto for single source |
 | `--outdir` | Custom output directory | `reports/YYYY-MM-DD/` |
+| `--json-out` | Write full run payload JSON to a fixed path | None |
+| `--md-out` | Write Markdown summary to a fixed path | None |
+| `--stdout-summary` | Print one-line JSON summary instead of full payload | Off |
+| `--format` | Markdown format: `full` or concise `telegram` | `full` |
+| `--health-out` | Stable per-source health state JSON path | `reports/source_health.json` |
 
 ### Available Sources (44+ with user OPML)
 
@@ -91,6 +104,9 @@ Only the **differences** from the universal template:
 | | `v2ex` | V2EX |
 | | `producthunt` | Product Hunt |
 | | `github` | GitHub Trending |
+| **Search Adapters** | `ddgs` | DuckDuckGo Search (text) |
+| | `ddgs_news` | DDGS News (experimental) |
+| | `tavily` | Tavily Search (stable fallback) |
 | **Tech Community** (v2) | `lobsters` | Lobsters |
 | | `devto` | Dev.to |
 | **AI/Tech** | `huggingface` | HF Daily Papers |
@@ -155,6 +171,34 @@ Pre-configured multi-source profiles:
 
 ```bash
 python3 scripts/daily_briefing.py --profile <profile>
+python3 scripts/daily_briefing.py --profile general --json-out /tmp/general.json --md-out /tmp/general.md --stdout-summary
+python3 scripts/daily_briefing.py --profile general --format telegram --md-out /tmp/general_telegram.md
+scripts/openclaw_run_briefing.sh general
+```
+
+Profiles are now loaded from `profiles/*.json`. Preserve existing profile names unless the user explicitly asks to add or rename one.
+
+Search-source guidance:
+
+- `ddgs`: use for local, no-key text search candidate recall
+- `ddgs_news`: experimental news search, good for gray rollout and comparison runs
+- `tavily`: keep as stable fallback until `ddgs_news` quality is proven
+
+Profile file shape:
+
+```json
+{
+  "name": "general",
+  "sections": {
+    "global_scan": {
+      "enrich": true,
+      "sources": [
+        { "source": "hackernews", "limit": 5 },
+        { "source": "github", "limit": 5, "keyword": "AI,LLM,GPT" }
+      ]
+    }
+  }
+}
 ```
 
 | Profile | Sources | Instruction File |
@@ -167,6 +211,50 @@ python3 scripts/daily_briefing.py --profile <profile>
 | `reading_list` | Essays, Podcasts | (Use universal template) |
 
 **Workflow**: Execute script → Read corresponding instruction file → Generate report following both the instruction file AND the universal template.
+
+### Unified Output Contract
+
+Both entrypoints now emit a top-level run envelope:
+
+- `run_at`
+- `source` or `profile`
+- `status`
+- `sources_total`
+- `sources_ok`
+- `sources_failed`
+- `failed_sources`
+- `items`
+
+Each item may include:
+
+- `published_at_raw`
+- `published_at_iso`
+- `fetched_at`
+- `age_minutes`
+- `canonical_url`
+
+Health state JSON now tracks at least:
+
+- `updated_at`
+- `sources.<source_key>.last_ok_at`
+- `sources.<source_key>.last_error_at`
+- `sources.<source_key>.last_error`
+- `sources.<source_key>.consecutive_errors`
+
+Canonicalization / dedupe notes:
+
+- Strip fragments and common tracking query params such as `utm_*`, `fbclid`, `gclid`
+- Normalize host casing and basic trailing slash / default port differences
+- Deduplicate on `canonical_url` first, then normalized title when needed
+- `daily_briefing.py` dedupes within each section; `fetch_news.py` dedupes within the current aggregated run
+
+### Unified Exit Codes
+
+- `0`: success with results
+- `10`: success but empty results
+- `20`: partial success, output generated, some sources failed
+- `50`: critical failure
+- `60`: timeout or missing dependency/environment
 
 ---
 

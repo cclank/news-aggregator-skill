@@ -132,6 +132,6 @@ playwright install chromium
 
 ## ⭐ Star History
 
-[![Star History Chart](https://api.star-history.com/svg?repos=cclank/news-aggregator-skill&type=Date)](https://www.star-history.com/#cclank/news-aggregator-skill&Date)
+[![Star History Chart](https://star-history.dera.page/svg?repos=cclank/news-aggregator-skill&type=Date)](https://star-history.dera.page/#cclank/news-aggregator-skill&Date)
 
 📝 **License**: MIT License

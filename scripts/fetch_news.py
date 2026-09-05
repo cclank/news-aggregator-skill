@@ -734,6 +734,7 @@ AI_NEWSLETTER_SOURCES = [
     ("ChinAI", "https://chinai.substack.com/feed"),
     ("Memia", "https://memia.substack.com/feed"),
     ("AI to ROI", "https://ai2roi.substack.com/feed"),
+    ("AI Weekly", "https://aiweekly.co/feed"),
     ("KDnuggets", "https://www.kdnuggets.com/feed"),
 ]
 

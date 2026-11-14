@@ -601,9 +601,9 @@ def fetch_infoq_cn(limit=5, keyword=None):
 
 
 def fetch_aihot(limit=15, keyword=None):
-    """AIHOT (aihot.virxact.com) AI 精选聚合，跨源中文编辑稿，日更 ~50 条。
-    默认拉最近 24h 内容（日更源，50 条/天，取最多 limit 条）。"""
-    raw = fetch_rss_feed("https://aihot.virxact.com/rss", "AIHOT", max(limit * 4, 50))
+    """AIHOT (aihot.news) 中文 AI 精选摘要。
+    默认拉最近 24h 内容，取最多 limit 条。"""
+    raw = fetch_rss_feed("https://aihot.news/feed.xml", "AIHOT", max(limit * 4, 50))
     items = filter_by_hours(raw, hours=24)
     return filter_items(items[:limit], keyword)
 
